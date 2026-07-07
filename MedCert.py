@@ -8,6 +8,11 @@ from zoneinfo import ZoneInfo
 import cv2
 import numpy as np
 from PIL import Image
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+
 st.set_page_config(page_title="ใบรับรองแพทย์ KU KPS", layout="wide")
 
 BKK = ZoneInfo("Asia/Bangkok")
@@ -159,7 +164,58 @@ def scan_or_enter():
         return manual.strip()
 
     return qr_text.strip()
+def create_certificate_pdf(row):
+    buffer = BytesIO()
+    c = canvas.Canvas(buffer, pagesize=A4)
+    width, height = A4
 
+    try:
+        pdfmetrics.registerFont(TTFont("THSarabun", "THSarabunNew.ttf"))
+        font = "THSarabun"
+    except:
+        font = "Helvetica"
+
+    c.setFont(font, 18)
+
+    y = height - 50
+    line_gap = 24
+
+    def draw(text, x=50):
+        nonlocal y
+        c.drawString(x, y, str(text))
+        y -= line_gap
+
+    c.setFont(font, 22)
+    c.drawCentredString(width / 2, y, "ใบรับรองแพทย์")
+    y -= 40
+
+    c.setFont(font, 18)
+
+    name_text = f"{row.get('prefix','')}{row.get('full_name','')}"
+    print_date = thai_date(now_bkk())
+
+    draw(f"สถานที่ตรวจ สถานพยาบาลมหาวิทยาลัยเกษตรศาสตร์ วิทยาเขตกำแพงแสน")
+    draw(f"วันที่ {print_date}")
+    draw(f"ข้าพเจ้า {row.get('doctor_name','')} ใบอนุญาตเลขที่ {row.get('doctor_license','')}")
+    draw(f"ได้ตรวจร่างกาย {name_text}")
+    draw(f"เลขบัตรประชาชน {row.get('citizen_id','')}")
+    draw(f"ที่อยู่ {row.get('address','')}")
+    draw("")
+    draw(f"น้ำหนัก {row.get('weight','')} กก.  ส่วนสูง {row.get('height','')} ซม.")
+    draw(f"ความดันโลหิต {row.get('bp','')} มม.ปรอท  ชีพจร {row.get('pulse','')} ครั้ง/นาที")
+    draw(f"ผลตรวจ Methamphetamine: {row.get('urine_meth_result','')}")
+    draw(f"สุขภาพทั่วไป: {row.get('general_status','')}")
+    draw(f"รายละเอียดผิดปกติ: {row.get('abnormal_detail','')}")
+    draw("")
+    draw(f"สรุปความคิดเห็นแพทย์: {row.get('doctor_opinion','')}")
+    y -= 50
+    draw("ลงชื่อ ........................................ แพทย์ผู้ตรวจ", x=300)
+    draw(f"({row.get('doctor_name','')})", x=340)
+
+    c.showPage()
+    c.save()
+    buffer.seek(0)
+    return buffer
 # ---------- CSS ----------
 st.markdown("""
 <style>
@@ -583,13 +639,14 @@ elif page == "พิมพ์":
 
     st.markdown(html, unsafe_allow_html=True)
 
-    st.markdown("""
-    <div class="no-print">
-    <button onclick="window.print()" style="font-size:20px;padding:10px 20px;">
-    พิมพ์ใบรับรองแพทย์
-    </button>
-    </div>
-    """, unsafe_allow_html=True)
+   pdf_buffer = create_certificate_pdf(row)
+
+    st.download_button(
+        label="ดาวน์โหลด PDF เพื่อพิมพ์",
+        data=pdf_buffer,
+        file_name=f"medical_certificate_{row.get('record_id','')}.pdf",
+        mime="application/pdf"
+    )
 
     if st.button("บันทึกว่าพิมพ์แล้ว"):
         df.loc[idx, "printed_at_bkk"] = now_bkk().isoformat()
