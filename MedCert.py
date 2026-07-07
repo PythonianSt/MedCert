@@ -47,6 +47,26 @@ def read_csv():
     content = base64.b64decode(data["content"]).decode("utf-8-sig")
     return pd.read_csv(StringIO(content), dtype=str).fillna(""), data["sha"]
 
+def ensure_columns(df):
+    cols = [
+        "record_id", "created_at_bkk", "status",
+        "appointment_date", "appointment_time",
+        "citizen_id", "prefix", "full_name", "sex", "address", "purpose",
+        "chronic", "chronic_detail", "accident", "accident_detail",
+        "hospital", "hospital_detail", "epilepsy", "epilepsy_detail",
+        "other_history", "other_history_detail",
+        "hn", "registration_note", "registered_at_bkk",
+        "urine_meth_result", "urine_note", "urine_checked_at_bkk",
+        "doctor_name", "doctor_license", "weight", "height", "bp", "pulse",
+        "general_status", "abnormal_detail", "other_exam",
+        "doctor_opinion", "doctor_approved_at_bkk",
+        "printed_at_bkk"
+    ]
+    for c in cols:
+        if c not in df.columns:
+            df[c] = ""
+    return df
+
 def save_csv(df, sha=None):
     csv_text = df.to_csv(index=False, encoding="utf-8-sig")
     encoded = base64.b64encode(csv_text.encode("utf-8-sig")).decode("utf-8")
@@ -149,6 +169,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 df, sha = read_csv()
+df = ensure_columns(df)
 
 # ---------- Menu ----------
 st.sidebar.title("เมนู")
@@ -365,7 +386,13 @@ elif page == "แพทย์":
         st.stop()
 
     row = df.loc[idx]
-    st.write(row[["full_name", "citizen_id", "purpose", "urine_meth_result"]])
+    show_cols = ["full_name", "citizen_id", "purpose", "urine_meth_result"]
+    available_cols = [c for c in show_cols if c in row.index]
+    
+    st.write(row[available_cols])
+    
+    if "urine_meth_result" not in row.index or row.get("urine_meth_result", "") == "":
+        st.warning("ยังไม่มีผลตรวจปัสสาวะ Methamphetamine")
 
     doctor_name = st.selectbox("แพทย์ผู้ตรวจ", list(DOCTORS.keys()))
     license_no = DOCTORS[doctor_name]
