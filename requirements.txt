@@ -3,3 +3,5 @@ pandas
 requests
 qrcode
 pillow
+opencv-python-headless
+numpy
