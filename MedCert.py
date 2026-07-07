@@ -639,7 +639,7 @@ elif page == "พิมพ์":
 
     st.markdown(html, unsafe_allow_html=True)
 
-   pdf_buffer = create_certificate_pdf(row)
+    pdf_buffer = create_certificate_pdf(row)
 
     st.download_button(
         label="ดาวน์โหลด PDF เพื่อพิมพ์",
