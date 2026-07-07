@@ -5,3 +5,4 @@ qrcode
 pillow
 opencv-python-headless
 numpy
+reportlab
