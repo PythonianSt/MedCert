@@ -1,0 +1,2 @@
+﻿record_id,created_at_bkk,status,appointment_date,appointment_time,citizen_id,prefix,full_name,sex,address,purpose,chronic,chronic_detail,accident,accident_detail,hospital,hospital_detail,epilepsy,epilepsy_detail,other_history,other_history_detail
+55F28DBA,2026-07-07T08:24:08.928099+07:00,booked,2026-07-07,09:00,3100800546087,นาย,กำธร ตันติวิทยาทันต์,ชาย,256/1 ,ใบอนุญาตขับรถ,มี,,ไม่มี,,ไม่มี,,ไม่มี,,ไม่มี,
