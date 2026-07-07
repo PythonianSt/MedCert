@@ -5,7 +5,9 @@ import requests, base64, uuid, qrcode
 from io import StringIO, BytesIO
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-
+import cv2
+import numpy as np
+from PIL import Image
 st.set_page_config(page_title="ใบรับรองแพทย์ KU KPS", layout="wide")
 
 BKK = ZoneInfo("Asia/Bangkok")
@@ -120,14 +122,43 @@ def password_gate(correct_password):
         st.warning("กรุณาใส่รหัสผ่านให้ถูกต้อง")
         st.stop()
 
+def read_qr_from_image(uploaded_file):
+    try:
+        image = Image.open(uploaded_file).convert("RGB")
+        img_array = np.array(image)
+        img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+
+        detector = cv2.QRCodeDetector()
+        data, points, _ = detector.detectAndDecode(img_bgr)
+
+        if data:
+            return data.strip()
+        return ""
+    except Exception:
+        return ""
+
+
 def scan_or_enter():
     st.subheader("สแกน QR หรือกรอกรหัสประจำตัว")
-    cam = st.camera_input("ถ่ายภาพ QR code")
-    record_id = st.text_input("หรือกรอกรหัสจาก QR")
 
-    # Streamlit ยังอ่าน QR จากภาพไม่ได้โดยตรงในโค้ดพื้นฐานนี้
-    # ใช้วิธีให้ QR แสดง record_id ใต้ภาพ และเจ้าหน้าที่กรอก/คัดลอกได้
-    return record_id.strip()
+    cam = st.camera_input("ถ่ายภาพ QR code")
+
+    qr_text = ""
+    if cam is not None:
+        qr_text = read_qr_from_image(cam)
+
+        if qr_text:
+            st.success("อ่าน QR code สำเร็จ")
+            st.code(qr_text)
+        else:
+            st.warning("ยังอ่าน QR ไม่ได้ กรุณาถ่ายใหม่ให้ QR ชัด อยู่กลางภาพ และมีแสงเพียงพอ")
+
+    manual = st.text_input("หรือกรอกรหัสจาก QR ด้วยตนเอง")
+
+    if manual.strip():
+        return manual.strip()
+
+    return qr_text.strip()
 
 # ---------- CSS ----------
 st.markdown("""
