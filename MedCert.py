@@ -16,12 +16,14 @@ import requests
 import streamlit as st
 from PIL import Image
 
+WEASYPRINT_IMPORT_ERROR = ""
 try:
     from weasyprint import HTML
     WEASYPRINT_AVAILABLE = True
-except Exception:
+except Exception as import_error:
     HTML = None
     WEASYPRINT_AVAILABLE = False
+    WEASYPRINT_IMPORT_ERROR = f"{type(import_error).__name__}: {import_error}"
 
 
 # =====================================================
@@ -576,7 +578,8 @@ def build_certificate_html(row):
 def create_certificate_pdf(row):
     if not WEASYPRINT_AVAILABLE:
         raise RuntimeError(
-            "ไม่พบ WeasyPrint กรุณาเพิ่ม weasyprint ใน requirements.txt"
+            "ไม่สามารถโหลด WeasyPrint ได้: "
+            + (WEASYPRINT_IMPORT_ERROR or "ไม่ทราบสาเหตุ")
         )
 
     document_html = build_certificate_html(row)
@@ -1297,9 +1300,12 @@ elif page == "พิมพ์":
         except Exception as error:
             st.error(f"สร้าง PDF ไม่สำเร็จ: {error}")
     else:
-        st.error(
-            "ยังสร้าง PDF ไม่ได้ เพราะไม่มี WeasyPrint กรุณาเพิ่ม `weasyprint` "
-            "ใน requirements.txt แล้ว Redeploy แอป"
+        st.error("ไม่สามารถโหลด WeasyPrint จึงยังสร้าง PDF ไม่ได้")
+        if WEASYPRINT_IMPORT_ERROR:
+            st.code(WEASYPRINT_IMPORT_ERROR)
+        st.info(
+            "ตรวจสอบว่า repository มีทั้ง requirements.txt และ packages.txt "
+            "จากนั้น Reboot หรือ Redeploy แอป"
         )
 
     if st.button("บันทึกว่าพิมพ์แล้ว"):
@@ -1313,4 +1319,5 @@ elif page == "พิมพ์":
             st.success("บันทึกสถานะพิมพ์แล้ว")
         except Exception as error:
             st.error(f"บันทึกข้อมูลไม่สำเร็จ: {error}")
+
 
