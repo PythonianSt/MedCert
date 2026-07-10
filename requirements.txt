@@ -1,8 +1,8 @@
 streamlit
 pandas
 requests
-qrcode
-pillow
+qrcode[pil]
 opencv-python-headless
 numpy
-reportlab
+Pillow
+weasyprint
