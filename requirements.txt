@@ -1,8 +1,8 @@
-streamlit
-pandas
-requests
-qrcode[pil]
-opencv-python-headless
-numpy
-Pillow
-weasyprint
+streamlit==1.59.1
+pandas==3.0.3
+requests==2.34.2
+qrcode[pil]==8.2
+opencv-python-headless==5.0.0.93
+numpy==2.5.1
+Pillow==12.3.0
+weasyprint==69.0
