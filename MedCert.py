@@ -1,10 +1,6 @@
 import base64
 import html
-import json
 import re
-import subprocess
-import sys
-import tempfile
 import uuid
 from datetime import date, datetime, timedelta
 from io import BytesIO, StringIO
@@ -12,14 +8,22 @@ from pathlib import Path
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
+import cv2
+import numpy as np
 import pandas as pd
 import qrcode
 import requests
 import streamlit as st
 from PIL import Image
 
-# WeasyPrint is imported lazily only when a PDF is requested.
-# This prevents native PDF libraries from loading during Streamlit startup.
+WEASYPRINT_IMPORT_ERROR = ""
+try:
+    from weasyprint import HTML
+    WEASYPRINT_AVAILABLE = True
+except Exception as import_error:
+    HTML = None
+    WEASYPRINT_AVAILABLE = False
+    WEASYPRINT_IMPORT_ERROR = f"{type(import_error).__name__}: {import_error}"
 
 
 # =====================================================
@@ -43,8 +47,6 @@ PASS_LAB = st.secrets.get("PASS_LAB", "KUKPS02")
 PASS_DOC = st.secrets.get("PASS_DOC", "KUKPS03")
 PASS_PRINT = st.secrets.get("PASS_PRINT", "KUKPS04")
 
-OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "")
-OPENAI_MODEL = st.secrets.get("OPENAI_MODEL", "gpt-4.1-mini")
 
 DOCTORS = {
     "นายแพทย์กำธร ตันติวิทยาทันต์": "12082",
@@ -292,99 +294,16 @@ def password_gate(correct_password, key):
 
 
 def read_qr_from_image(uploaded_file):
-    """อ่าน QR ใน subprocess เพื่อไม่ให้ native crash ทำให้ Streamlit หลักล้ม"""
-    image_bytes = uploaded_file.getvalue()
-    temp_path = None
     try:
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as temp_file:
-            temp_file.write(image_bytes)
-            temp_path = temp_file.name
-
-        qr_script = r"""
-import cv2
-import sys
-
-image = cv2.imread(sys.argv[1])
-if image is None:
-    raise SystemExit(2)
-
-detector = cv2.QRCodeDetector()
-data, _, _ = detector.detectAndDecode(image)
-print((data or "").strip())
-"""
-        completed = subprocess.run(
-            [sys.executable, "-c", qr_script, temp_path],
-            capture_output=True,
-            text=True,
-            timeout=15,
-            check=False,
-        )
-        if completed.returncode != 0:
-            return ""
-        return completed.stdout.strip()
+        image = Image.open(uploaded_file).convert("RGB")
+        image_array = np.array(image)
+        image_bgr = cv2.cvtColor(image_array, cv2.COLOR_RGB2BGR)
+        detector = cv2.QRCodeDetector()
+        data, _, _ = detector.detectAndDecode(image_bgr)
+        return data.strip() if data else ""
     except Exception:
         return ""
-    finally:
-        if temp_path:
-            try:
-                Path(temp_path).unlink(missing_ok=True)
-            except Exception:
-                pass
 
-
-def image_to_data_url(uploaded_file):
-    image_bytes = uploaded_file.getvalue()
-    mime_type = getattr(uploaded_file, "type", None) or "image/jpeg"
-    encoded = base64.b64encode(image_bytes).decode("ascii")
-    return f"data:{mime_type};base64,{encoded}"
-
-
-def extract_vitals_with_ai(uploaded_file):
-    if not OPENAI_API_KEY:
-        raise RuntimeError("ยังไม่ได้กำหนด OPENAI_API_KEY ใน Streamlit Secrets")
-
-    # Lazy import: โหลด OpenAI เฉพาะเมื่อผู้ใช้กดให้ AI อ่านภาพ
-    from openai import OpenAI
-
-    client = OpenAI(api_key=OPENAI_API_KEY)
-    response = client.responses.create(
-        model=OPENAI_MODEL,
-        input=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": (
-                            "อ่านค่าจากกระดาษบันทึกสัญญาณชีพในภาพนี้ "
-                            "ให้หาเฉพาะความดันโลหิตและชีพจร โดย BP ต้องอยู่ในรูป "
-                            "systolic/diastolic เช่น 120/80 และ pulse เป็นจำนวนครั้งต่อนาที "
-                            "ห้ามเดาค่าที่มองไม่ชัด ให้คืน JSON เท่านั้นในรูป "
-                            '{"bp":"", "pulse":"", "note":""}'
-                        ),
-                    },
-                    {
-                        "type": "input_image",
-                        "image_url": image_to_data_url(uploaded_file),
-                    },
-                ],
-            }
-        ],
-    )
-
-    raw = (response.output_text or "").strip()
-    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.I | re.S).strip()
-    try:
-        data = json.loads(cleaned)
-    except Exception as error:
-        raise RuntimeError(f"AI ส่งผลลัพธ์ที่อ่านไม่ได้: {raw}") from error
-
-    return {
-        "bp": str(data.get("bp", "")).strip(),
-        "pulse": str(data.get("pulse", "")).strip(),
-        "note": str(data.get("note", "")).strip(),
-        "raw": raw,
-    }
 
 
 def valid_bp(value):
@@ -532,13 +451,11 @@ def build_certificate_html(row):
 
 
 def create_certificate_pdf(row):
-    try:
-        from weasyprint import HTML
-    except Exception as import_error:
+    if not WEASYPRINT_AVAILABLE:
         raise RuntimeError(
             "ไม่สามารถโหลด WeasyPrint ได้: "
-            f"{type(import_error).__name__}: {import_error}"
-        ) from import_error
+            + (WEASYPRINT_IMPORT_ERROR or "ไม่ทราบสาเหตุ")
+        )
 
     document_html = build_certificate_html(row)
     pdf_bytes = HTML(string=document_html, base_url=str(Path.cwd())).write_pdf()
@@ -923,15 +840,21 @@ if page == "ผู้รับบริการ":
 # =====================================================
 elif page == "วัดสัญญาณชีพ":
     st.title("วัดสัญญาณชีพ")
-    st.caption("สแกน QR code จากใบนัดหมายก่อนเริ่มวัด")
+    st.caption("กรอกรหัสรายการจากใต้ QR code แล้วบันทึกค่าที่วัดได้ด้วยตนเอง")
 
-    record_id = scan_or_enter("vital")
+    record_id = st.text_input(
+        "รหัสรายการ",
+        placeholder="เช่น A1B2C3D4",
+        key="vital_manual_record_id",
+    ).strip()
+
     if not record_id:
+        st.info("กรุณากรอกรหัสรายการจากใต้ QR code")
         st.stop()
 
     idx = find_by_record(df, record_id)
     if idx is None:
-        st.error("ไม่พบข้อมูลนัดหมาย")
+        st.error("ไม่พบข้อมูลนัดหมาย กรุณาตรวจสอบรหัสรายการ")
         st.stop()
 
     row = df.loc[idx]
@@ -942,52 +865,48 @@ elif page == "วัดสัญญาณชีพ":
     today_bkk = now_bkk().date().isoformat()
     if str(row.get("appointment_date", "")) != today_bkk:
         st.info("รอวัดสัญญาณชีพที่สถานพยาบาลในวันนัดหมาย")
-        st.write(f"วันนัดหมาย: {display_date(row.get('appointment_date', ''))} เวลา {row.get('appointment_time', '')} น.")
+        st.write(
+            f"วันนัดหมาย: {display_date(row.get('appointment_date', ''))} "
+            f"เวลา {row.get('appointment_time', '')} น."
+        )
         st.stop()
 
-    st.success(f"{row.get('prefix', '')}{row.get('full_name', '')} — นัดเวลา {row.get('appointment_time', '')} น.")
+    st.success(
+        f"{row.get('prefix', '')}{row.get('full_name', '')} "
+        f"— นัดเวลา {row.get('appointment_time', '')} น."
+    )
 
-    vital_image = st.camera_input("ถ่ายภาพแผ่นกระดาษที่บันทึกค่า BP และ P", key="vital_paper_camera")
-
-    if "vital_ai_record_id" not in st.session_state or st.session_state.get("vital_ai_record_id") != record_id:
-        st.session_state["vital_ai_record_id"] = record_id
-        st.session_state["vital_ai_bp"] = row.get("vital_bp", "")
-        st.session_state["vital_ai_pulse"] = row.get("vital_pulse", "")
-        st.session_state["vital_ai_note"] = ""
-        st.session_state["vital_ai_raw"] = row.get("vital_ai_raw", "")
-
-    if vital_image is not None and st.button("ให้ AI อ่านค่าจากภาพ", type="primary"):
-        try:
-            with st.spinner("AI กำลังอ่านค่า BP และ P..."):
-                result = extract_vitals_with_ai(vital_image)
-            st.session_state["vital_ai_bp"] = result["bp"]
-            st.session_state["vital_ai_pulse"] = result["pulse"]
-            st.session_state["vital_ai_note"] = result["note"]
-            st.session_state["vital_ai_raw"] = result["raw"]
-            st.success("AI อ่านค่าแล้ว กรุณาตรวจสอบและแก้ไขก่อนบันทึก")
-        except Exception as error:
-            st.error(f"AI อ่านค่าไม่สำเร็จ: {error}")
-            st.info("ยังสามารถกรอกค่าด้วยตนเองได้")
-
-    if st.session_state.get("vital_ai_note"):
-        st.caption(f"หมายเหตุจาก AI: {st.session_state['vital_ai_note']}")
-
-    with st.form("vital_confirmation_form"):
-        st.subheader("ตรวจสอบหรือกรอกค่าด้วยตนเอง")
+    with st.form("vital_manual_form"):
+        st.subheader("กรอกค่าที่วัดได้")
         c1, c2 = st.columns(2)
         with c1:
-            vital_bp = st.text_input("BP (mmHg) เช่น 120/80", value=st.session_state.get("vital_ai_bp", row.get("vital_bp", "")))
-            vital_weight = st.text_input("BW (kg)", value=row.get("vital_weight", ""))
+            vital_bp = st.text_input(
+                "BP (mmHg) เช่น 120/80",
+                value=row.get("vital_bp", ""),
+            )
+            vital_weight = st.text_input(
+                "BW (kg)",
+                value=row.get("vital_weight", ""),
+            )
         with c2:
-            vital_pulse = st.text_input("P (ครั้ง/นาที)", value=st.session_state.get("vital_ai_pulse", row.get("vital_pulse", "")))
-            vital_height = st.text_input("Ht (cm)", value=row.get("vital_height", ""))
+            vital_pulse = st.text_input(
+                "P (ครั้ง/นาที)",
+                value=row.get("vital_pulse", ""),
+            )
+            vital_height = st.text_input(
+                "Ht (cm)",
+                value=row.get("vital_height", ""),
+            )
 
-        confirmed = st.checkbox("ตรวจสอบค่าจากภาพหรือค่าที่กรอกแล้ว")
-        save_vitals = st.form_submit_button("บันทึกสัญญาณชีพ", type="primary")
+        confirmed = st.checkbox("ตรวจสอบความถูกต้องของค่าที่กรอกแล้ว")
+        save_vitals = st.form_submit_button(
+            "บันทึกสัญญาณชีพ",
+            type="primary",
+        )
 
     if save_vitals:
         if not confirmed:
-            st.error("กรุณายืนยันว่าได้ตรวจสอบค่าแล้ว")
+            st.error("กรุณายืนยันว่าได้ตรวจสอบค่าที่กรอกแล้ว")
             st.stop()
         if not valid_bp(vital_bp):
             st.error("กรุณากรอก BP ในรูป systolic/diastolic เช่น 120/80")
@@ -1007,14 +926,19 @@ elif page == "วัดสัญญาณชีพ":
         df.loc[idx, "vital_pulse"] = vital_pulse.strip()
         df.loc[idx, "vital_weight"] = vital_weight.strip()
         df.loc[idx, "vital_height"] = vital_height.strip()
-        df.loc[idx, "vital_ai_raw"] = st.session_state.get("vital_ai_raw", "")
+        df.loc[idx, "vital_ai_raw"] = ""
         df.loc[idx, "vital_checked_at_bkk"] = timestamp
         df.loc[idx, "last_modified_at_bkk"] = timestamp
 
         try:
             save_csv(df, sha)
             st.success("บันทึกสัญญาณชีพเรียบร้อยแล้ว")
-            st.write({"BP": vital_bp, "P": vital_pulse, "BW": vital_weight, "Ht": vital_height})
+            st.write({
+                "BP": vital_bp,
+                "P": vital_pulse,
+                "BW": vital_weight,
+                "Ht": vital_height,
+            })
         except Exception as error:
             st.error(f"บันทึกข้อมูลไม่สำเร็จ: {error}")
 
@@ -1360,17 +1284,22 @@ elif page == "พิมพ์":
     certificate_html = build_certificate_html(row)
     st.markdown(certificate_html, unsafe_allow_html=True)
 
-    try:
-        pdf_buffer = create_certificate_pdf(row)
-        st.download_button(
-            label="ดาวน์โหลด PDF เพื่อพิมพ์",
-            data=pdf_buffer.getvalue(),
-            file_name=f"medical_certificate_{row.get('record_id', '')}.pdf",
-            mime="application/pdf",
-            type="primary",
-        )
-    except Exception as error:
-        st.error(f"สร้าง PDF ไม่สำเร็จ: {error}")
+    if WEASYPRINT_AVAILABLE:
+        try:
+            pdf_buffer = create_certificate_pdf(row)
+            st.download_button(
+                label="ดาวน์โหลด PDF เพื่อพิมพ์",
+                data=pdf_buffer.getvalue(),
+                file_name=f"medical_certificate_{row.get('record_id', '')}.pdf",
+                mime="application/pdf",
+                type="primary",
+            )
+        except Exception as error:
+            st.error(f"สร้าง PDF ไม่สำเร็จ: {error}")
+    else:
+        st.error("ไม่สามารถโหลด WeasyPrint จึงยังสร้าง PDF ไม่ได้")
+        if WEASYPRINT_IMPORT_ERROR:
+            st.code(WEASYPRINT_IMPORT_ERROR)
         st.info(
             "ตรวจสอบว่า repository มีทั้ง requirements.txt และ packages.txt "
             "จากนั้น Reboot หรือ Redeploy แอป"
@@ -1387,6 +1316,7 @@ elif page == "พิมพ์":
             st.success("บันทึกสถานะพิมพ์แล้ว")
         except Exception as error:
             st.error(f"บันทึกข้อมูลไม่สำเร็จ: {error}")
+
 
 
 
