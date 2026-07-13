@@ -1,5 +1,6 @@
 import base64
 import html
+import json
 import re
 import uuid
 from datetime import date, datetime, timedelta
@@ -14,6 +15,7 @@ import pandas as pd
 import qrcode
 import requests
 import streamlit as st
+from openai import OpenAI
 from PIL import Image
 
 WEASYPRINT_IMPORT_ERROR = ""
@@ -46,6 +48,9 @@ PASS_REG = st.secrets.get("PASS_REG", "KUKPS01")
 PASS_LAB = st.secrets.get("PASS_LAB", "KUKPS02")
 PASS_DOC = st.secrets.get("PASS_DOC", "KUKPS03")
 PASS_PRINT = st.secrets.get("PASS_PRINT", "KUKPS04")
+
+OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "")
+OPENAI_MODEL = st.secrets.get("OPENAI_MODEL", "gpt-4.1-mini")
 
 DOCTORS = {
     "นายแพทย์กำธร ตันติวิทยาทันต์": "12082",
@@ -121,6 +126,8 @@ def ensure_columns(df):
         "other_history", "other_history_detail",
         "hn", "registration_note", "registered_at_bkk",
         "urine_meth_result", "urine_note", "urine_checked_at_bkk",
+        "vital_bp", "vital_pulse", "vital_weight", "vital_height",
+        "vital_ai_raw", "vital_checked_at_bkk",
         "doctor_name", "doctor_license", "weight", "height", "bp", "pulse",
         "general_status", "abnormal_detail", "other_exam",
         "doctor_opinion", "doctor_approved_at_bkk",
@@ -302,6 +309,75 @@ def read_qr_from_image(uploaded_file):
         return ""
 
 
+def image_to_data_url(uploaded_file):
+    image_bytes = uploaded_file.getvalue()
+    mime_type = getattr(uploaded_file, "type", None) or "image/jpeg"
+    encoded = base64.b64encode(image_bytes).decode("ascii")
+    return f"data:{mime_type};base64,{encoded}"
+
+
+def extract_vitals_with_ai(uploaded_file):
+    if not OPENAI_API_KEY:
+        raise RuntimeError("ยังไม่ได้กำหนด OPENAI_API_KEY ใน Streamlit Secrets")
+
+    client = OpenAI(api_key=OPENAI_API_KEY)
+    response = client.responses.create(
+        model=OPENAI_MODEL,
+        input=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": (
+                            "อ่านค่าจากกระดาษบันทึกสัญญาณชีพในภาพนี้ "
+                            "ให้หาเฉพาะความดันโลหิตและชีพจร โดย BP ต้องอยู่ในรูป "
+                            "systolic/diastolic เช่น 120/80 และ pulse เป็นจำนวนครั้งต่อนาที "
+                            "ห้ามเดาค่าที่มองไม่ชัด ให้คืน JSON เท่านั้นในรูป "
+                            '{"bp":"", "pulse":"", "note":""}'
+                        ),
+                    },
+                    {
+                        "type": "input_image",
+                        "image_url": image_to_data_url(uploaded_file),
+                    },
+                ],
+            }
+        ],
+    )
+
+    raw = (response.output_text or "").strip()
+    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.I | re.S).strip()
+    try:
+        data = json.loads(cleaned)
+    except Exception as error:
+        raise RuntimeError(f"AI ส่งผลลัพธ์ที่อ่านไม่ได้: {raw}") from error
+
+    return {
+        "bp": str(data.get("bp", "")).strip(),
+        "pulse": str(data.get("pulse", "")).strip(),
+        "note": str(data.get("note", "")).strip(),
+        "raw": raw,
+    }
+
+
+def valid_bp(value):
+    text = str(value).strip()
+    match = re.fullmatch(r"(\d{2,3})\s*/\s*(\d{2,3})", text)
+    if not match:
+        return False
+    systolic, diastolic = map(int, match.groups())
+    return 50 <= systolic <= 300 and 30 <= diastolic <= 200
+
+
+def valid_positive_number(value, minimum, maximum):
+    try:
+        number = float(str(value).strip())
+        return minimum <= number <= maximum
+    except Exception:
+        return False
+
+
 def scan_or_enter(key_prefix):
     camera_image = st.camera_input(
         "ถ่ายภาพ QR code",
@@ -371,206 +447,60 @@ def build_certificate_html(row):
     issue_date = thai_date(get_issue_date(row))
     name_text = f"{row.get('prefix', '')}{row.get('full_name', '')}"
     cid_text = citizen_id_display(row.get("citizen_id", ""))
-
     font_css = embedded_font_css()
 
     return f"""
     <style>
         {font_css}
-        @page {{
-            size: A4;
-            margin: 11mm 12mm 11mm 12mm;
-        }}
-
+        @page {{ size: A4; margin: 7mm 9mm; }}
         .certificate-page {{
-            box-sizing: border-box;
-            width: 100%;
-            max-width: 186mm;
-            margin: 0 auto;
-            padding: 0;
+            box-sizing: border-box; width: 100%; max-width: 192mm; margin: 0 auto;
             font-family: 'THSarabunEmbedded', 'TH Sarabun New', 'Sarabun', sans-serif;
-            font-size: 18pt;
-            line-height: 1.25;
-            color: #111;
-            background: white;
+            font-size: 13.2pt; line-height: 1.08; color: #111; background: white;
         }}
-
-        .certificate-page h1 {{
-            margin: 0 0 5mm 0;
-            text-align: center;
-            font-size: 24pt;
-            line-height: 1.1;
-        }}
-
-        .certificate-page p {{
-            margin: 1.2mm 0;
-        }}
-
-        .certificate-page ol {{
-            margin: 1.5mm 0 1.5mm 9mm;
-            padding-left: 6mm;
-        }}
-
-        .certificate-page li {{
-            margin: 0.5mm 0;
-        }}
-
-        .right {{ text-align: right; }}
-        .center {{ text-align: center; }}
-        .bold {{ font-weight: 700; }}
-
-        .section-label {{
-            display: inline-block;
-            border: 1px solid #222;
-            border-radius: 2mm;
-            padding: 0.5mm 3mm;
-            font-weight: 700;
-        }}
-
-        .line {{
-            display: inline-block;
-            min-width: 45mm;
-            padding: 0 1.5mm;
-            border-bottom: 1px dotted #333;
-            vertical-align: baseline;
-        }}
-
-        .line-short {{ min-width: 28mm; }}
-        .line-long {{ min-width: 100mm; }}
-        .line-full {{ min-width: 145mm; }}
-
-        .signature-space {{
-            height: 8mm;
-        }}
-
-        .page-break {{
-            break-before: page;
-            page-break-before: always;
-        }}
-
-        .small-note {{
-            font-size: 15pt;
-        }}
-
-        @media screen {{
-            .certificate-page {{
-                box-shadow: 0 0 10px rgba(0,0,0,0.12);
-                padding: 11mm 12mm;
-                min-height: 297mm;
-            }}
-        }}
-
-        @media print {{
-            .certificate-page {{
-                box-shadow: none;
-                padding: 0;
-            }}
-        }}
+        .certificate-page h1 {{ margin: 0 0 2mm 0; text-align: center; font-size: 19pt; line-height: 1; }}
+        .certificate-page p {{ margin: 0.45mm 0; }}
+        .certificate-page ol {{ margin: 0.5mm 0 0.5mm 7mm; padding-left: 5mm; }}
+        .certificate-page li {{ margin: 0.15mm 0; }}
+        .right {{ text-align: right; }} .center {{ text-align: center; }} .bold {{ font-weight: 700; }}
+        .section-label {{ display:inline-block; border:1px solid #222; border-radius:1.5mm; padding:0.2mm 2mm; font-weight:700; }}
+        .line {{ display:inline-block; min-width:38mm; padding:0 1mm; border-bottom:1px dotted #333; vertical-align:baseline; }}
+        .line-short {{ min-width:23mm; }} .line-long {{ min-width:82mm; }} .line-full {{ min-width:135mm; }}
+        .section-divider {{ border-top: 1px solid #555; margin: 1.5mm 0 1mm 0; }}
+        .signature-row {{ display:flex; justify-content:flex-end; gap:4mm; margin-top:1mm; }}
+        .small-note {{ font-size: 11.5pt; }}
+        @media screen {{ .certificate-page {{ box-shadow:0 0 10px rgba(0,0,0,.12); padding:7mm 9mm; min-height:297mm; }} }}
+        @media print {{ .certificate-page {{ box-shadow:none; padding:0; }} }}
     </style>
 
     <div class="certificate-page">
-        <h1>ใบรับรองแพทย์ (สำหรับใบอนุญาตขับรถ)</h1>
+      <h1>ใบรับรองแพทย์ (สำหรับใบอนุญาตขับรถ)</h1>
+      <p class="right">เลขที่ <span class="line line-short">&nbsp;</span></p>
+      <p><span class="section-label">ส่วนที่ 1</span> <span class="bold">ของผู้ขอรับใบรับรองสุขภาพ</span></p>
+      <p>ข้าพเจ้า <span class="line line-long">{h(name_text)}</span> เลขบัตรประชาชน <span class="line">{cid_text}</span></p>
+      <p>สถานที่อยู่ที่ติดต่อได้ <span class="line line-full">{h(row.get('address', ''))}</span></p>
+      <p>อีเมล <span class="line line-long">{h(row.get('email', ''))}</span></p>
+      <p>ข้าพเจ้าขอใบรับรองสุขภาพ โดยมีประวัติสุขภาพดังนี้</p>
+      <p>1. โรคประจำตัว {checked(row.get('chronic'), 'ไม่มี')} ไม่มี {checked(row.get('chronic'), 'มี')} มี ระบุ <span class="line">{h(row.get('chronic_detail', ''))}</span></p>
+      <p>2. อุบัติเหตุและผ่าตัด {checked(row.get('accident'), 'ไม่มี')} ไม่มี {checked(row.get('accident'), 'มี')} มี ระบุ <span class="line">{h(row.get('accident_detail', ''))}</span></p>
+      <p>3. เคยรักษาในโรงพยาบาล {checked(row.get('hospital'), 'ไม่มี')} ไม่มี {checked(row.get('hospital'), 'มี')} มี ระบุ <span class="line">{h(row.get('hospital_detail', ''))}</span></p>
+      <p>4. โรคลมชัก * {checked(row.get('epilepsy'), 'ไม่มี')} ไม่มี {checked(row.get('epilepsy'), 'มี')} มี ระบุ <span class="line">{h(row.get('epilepsy_detail', ''))}</span></p>
+      <p>5. ประวัติอื่นที่สำคัญ {checked(row.get('other_history'), 'ไม่มี')} ไม่มี {checked(row.get('other_history'), 'มี')} มี ระบุ <span class="line">{h(row.get('other_history_detail', ''))}</span></p>
+      <div class="signature-row"><span>ลงชื่อ <span class="line">&nbsp;</span> ผู้ขอรับใบรับรองสุขภาพ</span><span>วันที่ <span class="line line-short">&nbsp;</span></span></div>
 
-        <p class="right">เลขที่ <span class="line line-short">&nbsp;</span></p>
-
-        <p><span class="section-label">ส่วนที่ 1</span> <span class="bold">ของผู้ขอรับใบรับรองสุขภาพ</span></p>
-
-        <p>ข้าพเจ้า <span class="line line-long">{h(name_text)}</span></p>
-        <p>สถานที่อยู่ (ที่สามารถติดต่อได้) <span class="line line-full">{h(row.get('address', ''))}</span></p>
-        <p>อีเมล <span class="line line-long">{h(row.get('email', ''))}</span></p>
-        <p>หมายเลขบัตรประชาชน <span class="line">{cid_text}</span></p>
-
-        <p>ข้าพเจ้าขอใบรับรองสุขภาพ โดยมีประวัติสุขภาพดังนี้</p>
-
-        <p>1. โรคประจำตัว {checked(row.get('chronic'), 'ไม่มี')} ไม่มี
-        {checked(row.get('chronic'), 'มี')} มี (ระบุ)
-        <span class="line">{h(row.get('chronic_detail', ''))}</span></p>
-
-        <p>2. อุบัติเหตุและผ่าตัด {checked(row.get('accident'), 'ไม่มี')} ไม่มี
-        {checked(row.get('accident'), 'มี')} มี (ระบุ)
-        <span class="line">{h(row.get('accident_detail', ''))}</span></p>
-
-        <p>3. เคยเข้ารับการรักษาในโรงพยาบาล {checked(row.get('hospital'), 'ไม่มี')} ไม่มี
-        {checked(row.get('hospital'), 'มี')} มี (ระบุ)
-        <span class="line">{h(row.get('hospital_detail', ''))}</span></p>
-
-        <p>4. โรคลมชัก * {checked(row.get('epilepsy'), 'ไม่มี')} ไม่มี
-        {checked(row.get('epilepsy'), 'มี')} มี (ระบุ)
-        <span class="line">{h(row.get('epilepsy_detail', ''))}</span></p>
-
-        <p>5. ประวัติอื่นที่สำคัญ {checked(row.get('other_history'), 'ไม่มี')} ไม่มี
-        {checked(row.get('other_history'), 'มี')} มี (ระบุ)
-        <span class="line">{h(row.get('other_history_detail', ''))}</span></p>
-
-        <div class="signature-space"></div>
-        <p class="right">ลงชื่อ <span class="line">&nbsp;</span> ผู้ขอรับใบรับรองสุขภาพ</p>
-        <p class="right">วันที่ <span class="line line-short">&nbsp;</span></p>
-
-        <div class="page-break"></div>
-
-        <p><span class="section-label">ส่วนที่ 2</span> <span class="bold">ของแพทย์</span></p>
-
-        <p>สถานที่ตรวจ สถานพยาบาลมหาวิทยาลัยเกษตรศาสตร์ วิทยาเขตกำแพงแสน</p>
-        <p>วันที่ <span class="line line-short">{issue_date}</span></p>
-
-        <p>
-            ข้าพเจ้า <span class="line">{h(row.get('doctor_name', ''))}</span>
-            ใบอนุญาตประกอบวิชาชีพเวชกรรมเลขที่
-            <span class="line line-short">{h(row.get('doctor_license', ''))}</span>
-        </p>
-
-        <p>
-            สถานพยาบาลชื่อ สถานพยาบาลมหาวิทยาลัยเกษตรศาสตร์ วิทยาเขตกำแพงแสน
-            ที่อยู่เลขที่ 1 หมู่ที่ 6 ตำบลกำแพงแสน อำเภอกำแพงแสน จังหวัดนครปฐม 73140
-        </p>
-
-        <p>ได้ตรวจร่างกาย <span class="line">{h(name_text)}</span> แล้วเมื่อวันที่
-        <span class="line line-short">{issue_date}</span> มีรายละเอียดดังนี้</p>
-
-        <p>
-            น้ำหนักตัว <span class="line line-short">{h(row.get('weight', ''))}</span> กก.
-            ความสูง <span class="line line-short">{h(row.get('height', ''))}</span> ซม.
-        </p>
-
-        <p>
-            ความดันโลหิต <span class="line line-short">{h(row.get('bp', ''))}</span> มม.ปรอท
-            ชีพจร <span class="line line-short">{h(row.get('pulse', ''))}</span> ครั้ง/นาที
-        </p>
-
-        <p>
-            สุขภาพร่างกายทั่วไปอยู่ในเกณฑ์
-            {checked(row.get('general_status'), 'ปกติ')} ปกติ
-            {checked(row.get('general_status'), 'ผิดปกติ')} ผิดปกติ (ระบุ)
-            <span class="line">{h(row.get('abnormal_detail', ''))}</span>
-        </p>
-
-        <p>
-            ผลตรวจ Methamphetamine
-            <span class="line">{h(row.get('urine_meth_result', ''))}</span>
-        </p>
-
-        <p>
-            ขอรับรองว่า บุคคลดังกล่าวไม่เป็นผู้มีร่างกายทุพพลภาพจนไม่สามารถปฏิบัติหน้าที่ได้
-            ไม่ปรากฏอาการของโรคจิตหรือจิตฟั่นเฟือนหรือปัญญาอ่อน
-            ไม่ปรากฏอาการของการติดยาเสพติดให้โทษ และอาการของโรคพิษสุราเรื้อรัง
-            และไม่ปรากฏอาการและอาการแสดงของโรคต่อไปนี้
-        </p>
-
-        <ol>
-            <li>โรคเรื้อนในระยะติดต่อ หรือในระยะที่ปรากฏอาการเป็นที่รังเกียจแก่สังคม</li>
-            <li>วัณโรคในระยะอันตราย</li>
-            <li>โรคเท้าช้างในระยะที่ปรากฏอาการเป็นที่รังเกียจแก่สังคม</li>
-            <li>อื่น ๆ ถ้ามี <span class="line line-long">{h(row.get('other_exam', ''))}</span></li>
-        </ol>
-
-        <p>สรุปความคิดเห็นและข้อแนะนำของแพทย์</p>
-        <p><span class="line line-full">{h(row.get('doctor_opinion', ''))}</span></p>
-
-        <div class="signature-space"></div>
-        <p class="right">ลงชื่อ <span class="line">&nbsp;</span> แพทย์ผู้ตรวจ</p>
-        <p class="right">({h(row.get('doctor_name', ''))})</p>
-
-        <p class="small-note">หมายเหตุ: ประทับตราสถานพยาบาลหลังพิมพ์เอกสาร</p>
+      <div class="section-divider"></div>
+      <p><span class="section-label">ส่วนที่ 2</span> <span class="bold">ของแพทย์</span></p>
+      <p>สถานที่ตรวจ สถานพยาบาลมหาวิทยาลัยเกษตรศาสตร์ วิทยาเขตกำแพงแสน วันที่ <span class="line line-short">{issue_date}</span></p>
+      <p>ข้าพเจ้า <span class="line">{h(row.get('doctor_name', ''))}</span> ใบอนุญาตประกอบวิชาชีพเวชกรรมเลขที่ <span class="line line-short">{h(row.get('doctor_license', ''))}</span></p>
+      <p>สถานพยาบาลมหาวิทยาลัยเกษตรศาสตร์ วิทยาเขตกำแพงแสน เลขที่ 1 หมู่ 6 ต.กำแพงแสน อ.กำแพงแสน จ.นครปฐม 73140</p>
+      <p>ได้ตรวจร่างกาย <span class="line">{h(name_text)}</span> เมื่อวันที่ <span class="line line-short">{issue_date}</span></p>
+      <p>น้ำหนัก <span class="line line-short">{h(row.get('weight', ''))}</span> กก. ความสูง <span class="line line-short">{h(row.get('height', ''))}</span> ซม. ความดันโลหิต <span class="line line-short">{h(row.get('bp', ''))}</span> มม.ปรอท ชีพจร <span class="line line-short">{h(row.get('pulse', ''))}</span> ครั้ง/นาที</p>
+      <p>สุขภาพทั่วไป {checked(row.get('general_status'), 'ปกติ')} ปกติ {checked(row.get('general_status'), 'ผิดปกติ')} ผิดปกติ ระบุ <span class="line">{h(row.get('abnormal_detail', ''))}</span> ผล Methamphetamine <span class="line line-short">{h(row.get('urine_meth_result', ''))}</span></p>
+      <p>ขอรับรองว่าบุคคลดังกล่าวไม่เป็นผู้มีร่างกายทุพพลภาพจนไม่สามารถปฏิบัติหน้าที่ได้ ไม่ปรากฏอาการของโรคจิตหรือจิตฟั่นเฟือนหรือปัญญาอ่อน ไม่ปรากฏอาการติดยาเสพติดให้โทษหรือโรคพิษสุราเรื้อรัง และไม่ปรากฏอาการของโรคต่อไปนี้</p>
+      <ol><li>โรคเรื้อนในระยะติดต่อ หรือระยะที่ปรากฏอาการเป็นที่รังเกียจแก่สังคม</li><li>วัณโรคในระยะอันตราย</li><li>โรคเท้าช้างในระยะที่ปรากฏอาการเป็นที่รังเกียจแก่สังคม</li><li>อื่น ๆ ถ้ามี <span class="line line-long">{h(row.get('other_exam', ''))}</span></li></ol>
+      <p>สรุปความคิดเห็นและข้อแนะนำของแพทย์ <span class="line line-full">{h(row.get('doctor_opinion', ''))}</span></p>
+      <div class="signature-row"><span>ลงชื่อ <span class="line">&nbsp;</span> แพทย์ผู้ตรวจ ({h(row.get('doctor_name', ''))})</span></div>
+      <p class="small-note">หมายเหตุ: ประทับตราสถานพยาบาลหลังพิมพ์เอกสาร</p>
     </div>
     """
 
@@ -653,6 +583,7 @@ page = st.sidebar.radio(
     "เลือกหน้า",
     [
         "ผู้รับบริการ",
+        "วัดสัญญาณชีพ",
         "เวชระเบียน",
         "ลงผลตรวจปัสสาวะ",
         "พยาบาล/แพทย์",
@@ -960,7 +891,108 @@ if page == "ผู้รับบริการ":
 
 
 # =====================================================
-# 2. เวชระเบียน
+# 2. วัดสัญญาณชีพ
+# =====================================================
+elif page == "วัดสัญญาณชีพ":
+    st.title("วัดสัญญาณชีพ")
+    st.caption("สแกน QR code จากใบนัดหมายก่อนเริ่มวัด")
+
+    record_id = scan_or_enter("vital")
+    if not record_id:
+        st.stop()
+
+    idx = find_by_record(df, record_id)
+    if idx is None:
+        st.error("ไม่พบข้อมูลนัดหมาย")
+        st.stop()
+
+    row = df.loc[idx]
+    if row.get("status", "") == "cancelled":
+        st.error("รายการนัดหมายนี้ถูกยกเลิกแล้ว")
+        st.stop()
+
+    today_bkk = now_bkk().date().isoformat()
+    if str(row.get("appointment_date", "")) != today_bkk:
+        st.info("รอวัดสัญญาณชีพที่สถานพยาบาลในวันนัดหมาย")
+        st.write(f"วันนัดหมาย: {display_date(row.get('appointment_date', ''))} เวลา {row.get('appointment_time', '')} น.")
+        st.stop()
+
+    st.success(f"{row.get('prefix', '')}{row.get('full_name', '')} — นัดเวลา {row.get('appointment_time', '')} น.")
+
+    vital_image = st.camera_input("ถ่ายภาพแผ่นกระดาษที่บันทึกค่า BP และ P", key="vital_paper_camera")
+
+    if "vital_ai_record_id" not in st.session_state or st.session_state.get("vital_ai_record_id") != record_id:
+        st.session_state["vital_ai_record_id"] = record_id
+        st.session_state["vital_ai_bp"] = row.get("vital_bp", "")
+        st.session_state["vital_ai_pulse"] = row.get("vital_pulse", "")
+        st.session_state["vital_ai_note"] = ""
+        st.session_state["vital_ai_raw"] = row.get("vital_ai_raw", "")
+
+    if vital_image is not None and st.button("ให้ AI อ่านค่าจากภาพ", type="primary"):
+        try:
+            with st.spinner("AI กำลังอ่านค่า BP และ P..."):
+                result = extract_vitals_with_ai(vital_image)
+            st.session_state["vital_ai_bp"] = result["bp"]
+            st.session_state["vital_ai_pulse"] = result["pulse"]
+            st.session_state["vital_ai_note"] = result["note"]
+            st.session_state["vital_ai_raw"] = result["raw"]
+            st.success("AI อ่านค่าแล้ว กรุณาตรวจสอบและแก้ไขก่อนบันทึก")
+        except Exception as error:
+            st.error(f"AI อ่านค่าไม่สำเร็จ: {error}")
+            st.info("ยังสามารถกรอกค่าด้วยตนเองได้")
+
+    if st.session_state.get("vital_ai_note"):
+        st.caption(f"หมายเหตุจาก AI: {st.session_state['vital_ai_note']}")
+
+    with st.form("vital_confirmation_form"):
+        st.subheader("ตรวจสอบหรือกรอกค่าด้วยตนเอง")
+        c1, c2 = st.columns(2)
+        with c1:
+            vital_bp = st.text_input("BP (mmHg) เช่น 120/80", value=st.session_state.get("vital_ai_bp", row.get("vital_bp", "")))
+            vital_weight = st.text_input("BW (kg)", value=row.get("vital_weight", ""))
+        with c2:
+            vital_pulse = st.text_input("P (ครั้ง/นาที)", value=st.session_state.get("vital_ai_pulse", row.get("vital_pulse", "")))
+            vital_height = st.text_input("Ht (cm)", value=row.get("vital_height", ""))
+
+        confirmed = st.checkbox("ตรวจสอบค่าจากภาพหรือค่าที่กรอกแล้ว")
+        save_vitals = st.form_submit_button("บันทึกสัญญาณชีพ", type="primary")
+
+    if save_vitals:
+        if not confirmed:
+            st.error("กรุณายืนยันว่าได้ตรวจสอบค่าแล้ว")
+            st.stop()
+        if not valid_bp(vital_bp):
+            st.error("กรุณากรอก BP ในรูป systolic/diastolic เช่น 120/80")
+            st.stop()
+        if not valid_positive_number(vital_pulse, 20, 250):
+            st.error("กรุณาตรวจสอบค่า P")
+            st.stop()
+        if not valid_positive_number(vital_weight, 10, 400):
+            st.error("กรุณาตรวจสอบค่า BW")
+            st.stop()
+        if not valid_positive_number(vital_height, 50, 250):
+            st.error("กรุณาตรวจสอบค่า Ht")
+            st.stop()
+
+        timestamp = now_bkk().isoformat()
+        df.loc[idx, "vital_bp"] = vital_bp.strip()
+        df.loc[idx, "vital_pulse"] = vital_pulse.strip()
+        df.loc[idx, "vital_weight"] = vital_weight.strip()
+        df.loc[idx, "vital_height"] = vital_height.strip()
+        df.loc[idx, "vital_ai_raw"] = st.session_state.get("vital_ai_raw", "")
+        df.loc[idx, "vital_checked_at_bkk"] = timestamp
+        df.loc[idx, "last_modified_at_bkk"] = timestamp
+
+        try:
+            save_csv(df, sha)
+            st.success("บันทึกสัญญาณชีพเรียบร้อยแล้ว")
+            st.write({"BP": vital_bp, "P": vital_pulse, "BW": vital_weight, "Ht": vital_height})
+        except Exception as error:
+            st.error(f"บันทึกข้อมูลไม่สำเร็จ: {error}")
+
+
+# =====================================================
+# 3. เวชระเบียน
 # =====================================================
 elif page == "เวชระเบียน":
     password_gate(PASS_REG, "password_registry")
@@ -1192,6 +1224,19 @@ elif page == "พยาบาล/แพทย์":
     if not row.get("urine_meth_result", ""):
         st.warning("ยังไม่มีผลตรวจปัสสาวะ Methamphetamine")
 
+    if row.get("vital_checked_at_bkk", ""):
+        st.subheader("ข้อมูลจากสถานีวัดสัญญาณชีพ")
+        st.write({
+            "BP": row.get("vital_bp", ""),
+            "P": row.get("vital_pulse", ""),
+            "BW": row.get("vital_weight", ""),
+            "Ht": row.get("vital_height", ""),
+            "บันทึกเวลา": row.get("vital_checked_at_bkk", ""),
+        })
+        st.caption("แพทย์/พยาบาลกรุณาตรวจสอบ และแก้ไขในช่องด้านล่างได้")
+    else:
+        st.warning("ยังไม่มีข้อมูลจากสถานีวัดสัญญาณชีพ")
+
     doctor_names = list(DOCTORS.keys())
     current_doctor = row.get("doctor_name", "")
     doctor_index = doctor_names.index(current_doctor) if current_doctor in doctor_names else 0
@@ -1201,11 +1246,11 @@ elif page == "พยาบาล/แพทย์":
 
     col1, col2 = st.columns(2)
     with col1:
-        weight = st.text_input("น้ำหนัก กก.", value=row.get("weight", ""))
-        bp = st.text_input("ความดันโลหิต มม.ปรอท", value=row.get("bp", ""))
+        weight = st.text_input("น้ำหนัก กก.", value=row.get("weight", "") or row.get("vital_weight", ""))
+        bp = st.text_input("ความดันโลหิต มม.ปรอท", value=row.get("bp", "") or row.get("vital_bp", ""))
     with col2:
-        height = st.text_input("ส่วนสูง ซม.", value=row.get("height", ""))
-        pulse = st.text_input("ชีพจร ครั้ง/นาที", value=row.get("pulse", ""))
+        height = st.text_input("ส่วนสูง ซม.", value=row.get("height", "") or row.get("vital_height", ""))
+        pulse = st.text_input("ชีพจร ครั้ง/นาที", value=row.get("pulse", "") or row.get("vital_pulse", ""))
 
     status_options = ["ปกติ", "ผิดปกติ"]
     current_general = row.get("general_status", "")
