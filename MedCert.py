@@ -2,6 +2,9 @@ import base64
 import html
 import json
 import re
+import subprocess
+import sys
+import tempfile
 import uuid
 from datetime import date, datetime, timedelta
 from io import BytesIO, StringIO
@@ -9,13 +12,10 @@ from pathlib import Path
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
-import cv2
-import numpy as np
 import pandas as pd
 import qrcode
 import requests
 import streamlit as st
-from openai import OpenAI
 from PIL import Image
 
 WEASYPRINT_IMPORT_ERROR = ""
@@ -44,10 +44,10 @@ GITHUB_REPO = st.secrets["GITHUB_REPO"]
 GITHUB_BRANCH = st.secrets.get("GITHUB_BRANCH", "main")
 CSV_PATH = st.secrets.get("CSV_PATH", "medical_certificate.csv")
 
-PASS_REG = st.secrets.get("PASS_REG", "KUKPS01")
-PASS_LAB = st.secrets.get("PASS_LAB", "KUKPS02")
-PASS_DOC = st.secrets.get("PASS_DOC", "KUKPS03")
-PASS_PRINT = st.secrets.get("PASS_PRINT", "KUKPS04")
+PASS_REG = st.secrets.get("PASS_REG", "Q1")
+PASS_LAB = st.secrets.get("PASS_LAB", "Q2")
+PASS_DOC = st.secrets.get("PASS_DOC", "Q33")
+PASS_PRINT = st.secrets.get("PASS_PRINT", "Q4")
 
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "")
 OPENAI_MODEL = st.secrets.get("OPENAI_MODEL", "gpt-4.1-mini")
@@ -298,15 +298,44 @@ def password_gate(correct_password, key):
 
 
 def read_qr_from_image(uploaded_file):
+    """อ่าน QR ใน subprocess เพื่อไม่ให้ native crash ทำให้ Streamlit หลักล้ม"""
+    image_bytes = uploaded_file.getvalue()
+    temp_path = None
     try:
-        image = Image.open(uploaded_file).convert("RGB")
-        image_array = np.array(image)
-        image_bgr = cv2.cvtColor(image_array, cv2.COLOR_RGB2BGR)
-        detector = cv2.QRCodeDetector()
-        data, _, _ = detector.detectAndDecode(image_bgr)
-        return data.strip() if data else ""
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as temp_file:
+            temp_file.write(image_bytes)
+            temp_path = temp_file.name
+
+        qr_script = r"""
+import cv2
+import sys
+
+image = cv2.imread(sys.argv[1])
+if image is None:
+    raise SystemExit(2)
+
+detector = cv2.QRCodeDetector()
+data, _, _ = detector.detectAndDecode(image)
+print((data or "").strip())
+"""
+        completed = subprocess.run(
+            [sys.executable, "-c", qr_script, temp_path],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        if completed.returncode != 0:
+            return ""
+        return completed.stdout.strip()
     except Exception:
         return ""
+    finally:
+        if temp_path:
+            try:
+                Path(temp_path).unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 def image_to_data_url(uploaded_file):
@@ -319,6 +348,9 @@ def image_to_data_url(uploaded_file):
 def extract_vitals_with_ai(uploaded_file):
     if not OPENAI_API_KEY:
         raise RuntimeError("ยังไม่ได้กำหนด OPENAI_API_KEY ใน Streamlit Secrets")
+
+    # Lazy import: โหลด OpenAI เฉพาะเมื่อผู้ใช้กดให้ AI อ่านภาพ
+    from openai import OpenAI
 
     client = OpenAI(api_key=OPENAI_API_KEY)
     response = client.responses.create(
@@ -1017,7 +1049,7 @@ elif page == "เวชระเบียน":
         )
         st.dataframe(
             dataframe_for_dashboard(appointments),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
     else:
@@ -1364,5 +1396,6 @@ elif page == "พิมพ์":
             st.success("บันทึกสถานะพิมพ์แล้ว")
         except Exception as error:
             st.error(f"บันทึกข้อมูลไม่สำเร็จ: {error}")
+
 
 
