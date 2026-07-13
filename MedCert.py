@@ -18,14 +18,8 @@ import requests
 import streamlit as st
 from PIL import Image
 
-WEASYPRINT_IMPORT_ERROR = ""
-try:
-    from weasyprint import HTML
-    WEASYPRINT_AVAILABLE = True
-except Exception as import_error:
-    HTML = None
-    WEASYPRINT_AVAILABLE = False
-    WEASYPRINT_IMPORT_ERROR = f"{type(import_error).__name__}: {import_error}"
+# WeasyPrint is imported lazily only when a PDF is requested.
+# This prevents native PDF libraries from loading during Streamlit startup.
 
 
 # =====================================================
@@ -44,10 +38,10 @@ GITHUB_REPO = st.secrets["GITHUB_REPO"]
 GITHUB_BRANCH = st.secrets.get("GITHUB_BRANCH", "main")
 CSV_PATH = st.secrets.get("CSV_PATH", "medical_certificate.csv")
 
-PASS_REG = st.secrets.get("PASS_REG", "Q1")
-PASS_LAB = st.secrets.get("PASS_LAB", "Q2")
-PASS_DOC = st.secrets.get("PASS_DOC", "Q33")
-PASS_PRINT = st.secrets.get("PASS_PRINT", "Q4")
+PASS_REG = st.secrets.get("PASS_REG", "KUKPS01")
+PASS_LAB = st.secrets.get("PASS_LAB", "KUKPS02")
+PASS_DOC = st.secrets.get("PASS_DOC", "KUKPS03")
+PASS_PRINT = st.secrets.get("PASS_PRINT", "KUKPS04")
 
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "")
 OPENAI_MODEL = st.secrets.get("OPENAI_MODEL", "gpt-4.1-mini")
@@ -538,11 +532,13 @@ def build_certificate_html(row):
 
 
 def create_certificate_pdf(row):
-    if not WEASYPRINT_AVAILABLE:
+    try:
+        from weasyprint import HTML
+    except Exception as import_error:
         raise RuntimeError(
             "ไม่สามารถโหลด WeasyPrint ได้: "
-            + (WEASYPRINT_IMPORT_ERROR or "ไม่ทราบสาเหตุ")
-        )
+            f"{type(import_error).__name__}: {import_error}"
+        ) from import_error
 
     document_html = build_certificate_html(row)
     pdf_bytes = HTML(string=document_html, base_url=str(Path.cwd())).write_pdf()
@@ -1364,22 +1360,17 @@ elif page == "พิมพ์":
     certificate_html = build_certificate_html(row)
     st.markdown(certificate_html, unsafe_allow_html=True)
 
-    if WEASYPRINT_AVAILABLE:
-        try:
-            pdf_buffer = create_certificate_pdf(row)
-            st.download_button(
-                label="ดาวน์โหลด PDF เพื่อพิมพ์",
-                data=pdf_buffer.getvalue(),
-                file_name=f"medical_certificate_{row.get('record_id', '')}.pdf",
-                mime="application/pdf",
-                type="primary",
-            )
-        except Exception as error:
-            st.error(f"สร้าง PDF ไม่สำเร็จ: {error}")
-    else:
-        st.error("ไม่สามารถโหลด WeasyPrint จึงยังสร้าง PDF ไม่ได้")
-        if WEASYPRINT_IMPORT_ERROR:
-            st.code(WEASYPRINT_IMPORT_ERROR)
+    try:
+        pdf_buffer = create_certificate_pdf(row)
+        st.download_button(
+            label="ดาวน์โหลด PDF เพื่อพิมพ์",
+            data=pdf_buffer.getvalue(),
+            file_name=f"medical_certificate_{row.get('record_id', '')}.pdf",
+            mime="application/pdf",
+            type="primary",
+        )
+    except Exception as error:
+        st.error(f"สร้าง PDF ไม่สำเร็จ: {error}")
         st.info(
             "ตรวจสอบว่า repository มีทั้ง requirements.txt และ packages.txt "
             "จากนั้น Reboot หรือ Redeploy แอป"
@@ -1396,6 +1387,7 @@ elif page == "พิมพ์":
             st.success("บันทึกสถานะพิมพ์แล้ว")
         except Exception as error:
             st.error(f"บันทึกข้อมูลไม่สำเร็จ: {error}")
+
 
 
 
