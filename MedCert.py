@@ -218,8 +218,21 @@ def parse_iso_datetime(value):
 
 
 def get_issue_date(row):
-    approved = parse_iso_datetime(row.get("doctor_approved_at_bkk", ""))
-    return approved.date() if approved else now_bkk().date()
+    """
+    วันที่ออกใบรับรองจาก Timestamp เขตเวลา Bangkok
+    เรียงลำดับจากเวลาที่แพทย์อนุมัติ แล้วจึงใช้ timestamp อื่นเป็นข้อมูลสำรอง
+    """
+    for column in [
+        "doctor_approved_at_bkk",
+        "printed_at_bkk",
+        "vital_checked_at_bkk",
+        "registered_at_bkk",
+        "created_at_bkk",
+    ]:
+        parsed = parse_iso_datetime(row.get(column, ""))
+        if parsed:
+            return parsed.date()
+    return now_bkk().date()
 
 
 def start_of_week(day_value):
@@ -313,6 +326,15 @@ def valid_bp(value):
         return False
     systolic, diastolic = map(int, match.groups())
     return 50 <= systolic <= 300 and 30 <= diastolic <= 200
+
+
+def split_bp(value):
+    """คืนค่า systolic/diastolic จากข้อความ BP เดิม เพื่อใช้เติมค่าเริ่มต้นในช่องแยก"""
+    text = str(value or "").strip()
+    match = re.fullmatch(r"(\d{2,3})\s*/\s*(\d{2,3})", text)
+    if not match:
+        return "", ""
+    return match.group(1), match.group(2)
 
 
 def valid_positive_number(value, minimum, maximum):
@@ -431,7 +453,7 @@ def build_certificate_html(row):
       <p>3. เคยรักษาในโรงพยาบาล {checked(row.get('hospital'), 'ไม่มี')} ไม่มี {checked(row.get('hospital'), 'มี')} มี ระบุ <span class="line">{h(row.get('hospital_detail', ''))}</span></p>
       <p>4. โรคลมชัก * {checked(row.get('epilepsy'), 'ไม่มี')} ไม่มี {checked(row.get('epilepsy'), 'มี')} มี ระบุ <span class="line">{h(row.get('epilepsy_detail', ''))}</span></p>
       <p>5. ประวัติอื่นที่สำคัญ {checked(row.get('other_history'), 'ไม่มี')} ไม่มี {checked(row.get('other_history'), 'มี')} มี ระบุ <span class="line">{h(row.get('other_history_detail', ''))}</span></p>
-      <div class="signature-row"><span>ลงชื่อ <span class="line">&nbsp;</span> ผู้ขอรับใบรับรองสุขภาพ</span><span>วันที่ <span class="line line-short">&nbsp;</span></span></div>
+      <div class="signature-row"><span>ลงชื่อ <span class="line">&nbsp;</span> ผู้ขอรับใบรับรองสุขภาพ</span><span>วันที่ <span class="line line-short">{issue_date}</span></span></div>
 
       <div class="section-divider"></div>
       <p><span class="section-label">ส่วนที่ 2</span> <span class="bold">ของแพทย์</span></p>
@@ -878,12 +900,36 @@ elif page == "วัดสัญญาณชีพ":
 
     with st.form("vital_manual_form"):
         st.subheader("กรอกค่าที่วัดได้")
+        existing_sbp, existing_dbp = split_bp(row.get("vital_bp", ""))
+
+        st.markdown("**BP (mmHg)**")
+        bp_col1, bp_slash_col, bp_col2 = st.columns([1, 0.12, 1])
+        with bp_col1:
+            vital_sbp = st.text_input(
+                "ค่าบน",
+                value=existing_sbp,
+                placeholder="120",
+                max_chars=3,
+                label_visibility="collapsed",
+            )
+        with bp_slash_col:
+            st.markdown(
+                "<div style='text-align:center;font-size:2rem;padding-top:0.15rem;'>/</div>",
+                unsafe_allow_html=True,
+            )
+        with bp_col2:
+            vital_dbp = st.text_input(
+                "ค่าล่าง",
+                value=existing_dbp,
+                placeholder="80",
+                max_chars=3,
+                label_visibility="collapsed",
+            )
+
+        vital_bp = f"{vital_sbp.strip()}/{vital_dbp.strip()}"
+
         c1, c2 = st.columns(2)
         with c1:
-            vital_bp = st.text_input(
-                "BP (mmHg) เช่น 120/80",
-                value=row.get("vital_bp", ""),
-            )
             vital_weight = st.text_input(
                 "BW (kg)",
                 value=row.get("vital_weight", ""),
@@ -1198,11 +1244,50 @@ elif page == "พยาบาล/แพทย์":
 
     col1, col2 = st.columns(2)
     with col1:
-        weight = st.text_input("น้ำหนัก กก.", value=row.get("weight", "") or row.get("vital_weight", ""))
-        bp = st.text_input("ความดันโลหิต มม.ปรอท", value=row.get("bp", "") or row.get("vital_bp", ""))
+        weight = st.text_input(
+            "น้ำหนัก กก.",
+            value=row.get("weight", "") or row.get("vital_weight", ""),
+        )
     with col2:
-        height = st.text_input("ส่วนสูง ซม.", value=row.get("height", "") or row.get("vital_height", ""))
-        pulse = st.text_input("ชีพจร ครั้ง/นาที", value=row.get("pulse", "") or row.get("vital_pulse", ""))
+        height = st.text_input(
+            "ส่วนสูง ซม.",
+            value=row.get("height", "") or row.get("vital_height", ""),
+        )
+
+    existing_doctor_sbp, existing_doctor_dbp = split_bp(
+        row.get("bp", "") or row.get("vital_bp", "")
+    )
+    st.markdown("**ความดันโลหิต (mmHg)**")
+    doctor_bp_col1, doctor_bp_slash_col, doctor_bp_col2 = st.columns([1, 0.12, 1])
+    with doctor_bp_col1:
+        doctor_sbp = st.text_input(
+            "ค่าบน",
+            value=existing_doctor_sbp,
+            placeholder="120",
+            max_chars=3,
+            key="doctor_sbp",
+            label_visibility="collapsed",
+        )
+    with doctor_bp_slash_col:
+        st.markdown(
+            "<div style='text-align:center;font-size:2rem;padding-top:0.15rem;'>/</div>",
+            unsafe_allow_html=True,
+        )
+    with doctor_bp_col2:
+        doctor_dbp = st.text_input(
+            "ค่าล่าง",
+            value=existing_doctor_dbp,
+            placeholder="80",
+            max_chars=3,
+            key="doctor_dbp",
+            label_visibility="collapsed",
+        )
+
+    bp = f"{doctor_sbp.strip()}/{doctor_dbp.strip()}"
+    pulse = st.text_input(
+        "ชีพจร ครั้ง/นาที",
+        value=row.get("pulse", "") or row.get("vital_pulse", ""),
+    )
 
     status_options = ["ปกติ", "ผิดปกติ"]
     current_general = row.get("general_status", "")
@@ -1232,6 +1317,9 @@ elif page == "พยาบาล/แพทย์":
     if st.button("Approve", type="primary"):
         if not approve:
             st.error("กรุณาติ๊กยืนยันการอนุมัติ")
+            st.stop()
+        if not valid_bp(bp):
+            st.error("กรุณากรอก BP ค่าบนและค่าล่างให้ถูกต้อง")
             st.stop()
 
         timestamp = now_bkk().isoformat()
@@ -1316,6 +1404,9 @@ elif page == "พิมพ์":
             st.success("บันทึกสถานะพิมพ์แล้ว")
         except Exception as error:
             st.error(f"บันทึกข้อมูลไม่สำเร็จ: {error}")
+
+
+
 
 
 
