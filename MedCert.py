@@ -42,10 +42,10 @@ GITHUB_REPO = st.secrets["GITHUB_REPO"]
 GITHUB_BRANCH = st.secrets.get("GITHUB_BRANCH", "main")
 CSV_PATH = st.secrets.get("CSV_PATH", "medical_certificate.csv")
 
-PASS_REG = st.secrets.get("PASS_REG", "KUKPS01")
-PASS_LAB = st.secrets.get("PASS_LAB", "KUKPS02")
-PASS_DOC = st.secrets.get("PASS_DOC", "KUKPS03")
-PASS_PRINT = st.secrets.get("PASS_PRINT", "KUKPS04")
+PASS_REG = st.secrets.get("PASS_REG", "q01")
+PASS_LAB = st.secrets.get("PASS_LAB", "q02")
+PASS_DOC = st.secrets.get("PASS_DOC", "q03")
+PASS_PRINT = st.secrets.get("PASS_PRINT", "q04")
 
 
 DOCTORS = {
