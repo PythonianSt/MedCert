@@ -15,8 +15,9 @@ import streamlit as st
 
 WEASYPRINT_IMPORT_ERROR = ""
 try:
-    from weasyprint import HTML
-    WEASYPRINT_AVAILABLE = True
+    #from weasyprint import HTML
+    #WEASYPRINT_AVAILABLE = True
+    HTML = None
 except Exception as import_error:
     HTML = None
     WEASYPRINT_AVAILABLE = False
