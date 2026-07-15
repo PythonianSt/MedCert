@@ -13,15 +13,10 @@ import qrcode
 import requests
 import streamlit as st
 
-WEASYPRINT_IMPORT_ERROR = ""
-try:
-    #from weasyprint import HTML
-    #WEASYPRINT_AVAILABLE = True
-    HTML = None
-except Exception as import_error:
-    HTML = None
-    WEASYPRINT_AVAILABLE = False
-    WEASYPRINT_IMPORT_ERROR = f"{type(import_error).__name__}: {import_error}"
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.pdfgen import canvas
 
 
 # =====================================================
@@ -443,16 +438,143 @@ def build_certificate_html(row):
     """
 
 
-def create_certificate_pdf(row):
-    if not WEASYPRINT_AVAILABLE:
-        raise RuntimeError(
-            "ไม่สามารถโหลด WeasyPrint ได้: "
-            + (WEASYPRINT_IMPORT_ERROR or "ไม่ทราบสาเหตุ")
-        )
+def _reportlab_font_name():
+    """Register the Thai font bundled with the repository."""
+    candidates = [
+        Path("THSarabunNew.ttf"),
+        Path(__file__).resolve().parent / "THSarabunNew.ttf",
+    ]
+    for font_path in candidates:
+        if font_path.exists():
+            font_name = "THSarabunNew"
+            if font_name not in pdfmetrics.getRegisteredFontNames():
+                pdfmetrics.registerFont(TTFont(font_name, str(font_path)))
+            return font_name
+    raise FileNotFoundError(
+        "ไม่พบไฟล์ THSarabunNew.ttf กรุณาวางไฟล์นี้ไว้ใน repository เดียวกับ MedCert.py"
+    )
 
-    document_html = build_certificate_html(row)
-    pdf_bytes = HTML(string=document_html, base_url=str(Path.cwd())).write_pdf()
-    return BytesIO(pdf_bytes)
+
+def _wrap_text(text, font_name, font_size, max_width):
+    text = str(text or "").strip()
+    if not text:
+        return [""]
+    words = text.split()
+    lines, current = [], ""
+    for word in words:
+        candidate = word if not current else f"{current} {word}"
+        if pdfmetrics.stringWidth(candidate, font_name, font_size) <= max_width:
+            current = candidate
+        else:
+            if current:
+                lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines or [""]
+
+
+def create_certificate_pdf(row):
+    """Create a one-page A4 Thai medical certificate with ReportLab."""
+    font_name = _reportlab_font_name()
+    buffer = BytesIO()
+    pdf = canvas.Canvas(buffer, pagesize=A4)
+    page_width, page_height = A4
+
+    left = 32
+    right = page_width - 32
+    y = page_height - 28
+    body_size = 11.6
+    small_size = 10.2
+    leading = 14.0
+
+    def text_line(text, x=left, size=body_size, bold=False, align="left"):
+        nonlocal y
+        pdf.setFont(font_name, size)
+        if align == "center":
+            pdf.drawCentredString(page_width / 2, y, str(text))
+        elif align == "right":
+            pdf.drawRightString(right, y, str(text))
+        else:
+            pdf.drawString(x, y, str(text))
+        y -= leading
+
+    def wrapped(text, x=left, width=None, size=body_size, indent=0, gap=0):
+        nonlocal y
+        width = width or (right - x)
+        pdf.setFont(font_name, size)
+        for line in _wrap_text(text, font_name, size, width - indent):
+            pdf.drawString(x + indent, y, line)
+            y -= leading
+        y -= gap
+
+    def divider():
+        nonlocal y
+        y -= 2
+        pdf.line(left, y, right, y)
+        y -= 9
+
+    def mark(value, target):
+        return "☑" if str(value) == target else "☐"
+
+    issue_date = thai_date(get_issue_date(row))
+    name_text = f"{row.get('prefix', '')}{row.get('full_name', '')}"
+    cid_text = citizen_id_display(row.get("citizen_id", ""))
+
+    text_line("ใบรับรองแพทย์ (สำหรับใบอนุญาตขับรถ)", size=16.5, align="center")
+    y += 3
+    text_line("เลขที่ ........................................", align="right", size=small_size)
+    text_line("ส่วนที่ 1  ของผู้ขอรับใบรับรองสุขภาพ", size=13.2)
+    text_line(f"ข้าพเจ้า {name_text}    เลขบัตรประชาชน {cid_text}")
+    wrapped(f"สถานที่อยู่ที่ติดต่อได้ {row.get('address', '')}", gap=0)
+    text_line(f"อีเมล {row.get('email', '')}")
+    text_line("ข้าพเจ้าขอใบรับรองสุขภาพ โดยมีประวัติสุขภาพดังนี้")
+    text_line(f"1. โรคประจำตัว {mark(row.get('chronic'), 'ไม่มี')} ไม่มี  {mark(row.get('chronic'), 'มี')} มี  ระบุ {row.get('chronic_detail', '')}")
+    text_line(f"2. อุบัติเหตุและผ่าตัด {mark(row.get('accident'), 'ไม่มี')} ไม่มี  {mark(row.get('accident'), 'มี')} มี  ระบุ {row.get('accident_detail', '')}")
+    text_line(f"3. เคยรักษาในโรงพยาบาล {mark(row.get('hospital'), 'ไม่มี')} ไม่มี  {mark(row.get('hospital'), 'มี')} มี  ระบุ {row.get('hospital_detail', '')}")
+    text_line(f"4. โรคลมชัก * {mark(row.get('epilepsy'), 'ไม่มี')} ไม่มี  {mark(row.get('epilepsy'), 'มี')} มี  ระบุ {row.get('epilepsy_detail', '')}")
+    text_line(f"5. ประวัติอื่นที่สำคัญ {mark(row.get('other_history'), 'ไม่มี')} ไม่มี  {mark(row.get('other_history'), 'มี')} มี  ระบุ {row.get('other_history_detail', '')}")
+    text_line(f"ลงชื่อ ........................................................ ผู้ขอรับใบรับรองสุขภาพ     วันที่ {issue_date}", align="right", size=small_size)
+
+    divider()
+    text_line("ส่วนที่ 2  ของแพทย์", size=13.2)
+    text_line(f"สถานที่ตรวจ สถานพยาบาลมหาวิทยาลัยเกษตรศาสตร์ วิทยาเขตกำแพงแสน   วันที่ {issue_date}")
+    text_line(f"ข้าพเจ้า {row.get('doctor_name', '')}   ใบอนุญาตประกอบวิชาชีพเวชกรรมเลขที่ {row.get('doctor_license', '')}")
+    wrapped("สถานพยาบาลมหาวิทยาลัยเกษตรศาสตร์ วิทยาเขตกำแพงแสน เลขที่ 1 หมู่ 6 ตำบลกำแพงแสน อำเภอกำแพงแสน จังหวัดนครปฐม 73140")
+    text_line(f"ได้ตรวจร่างกาย {name_text} เมื่อวันที่ {issue_date}")
+    text_line(
+        f"น้ำหนัก {row.get('weight', '')} กก.  ความสูง {row.get('height', '')} ซม.  "
+        f"ความดันโลหิต {row.get('bp', '')} มม.ปรอท  ชีพจร {row.get('pulse', '')} ครั้ง/นาที"
+    )
+    text_line(
+        f"สุขภาพทั่วไป {mark(row.get('general_status'), 'ปกติ')} ปกติ  "
+        f"{mark(row.get('general_status'), 'ผิดปกติ')} ผิดปกติ ระบุ {row.get('abnormal_detail', '')}  "
+        f"ผล Methamphetamine {row.get('urine_meth_result', '')}"
+    )
+    wrapped(
+        "ขอรับรองว่าบุคคลดังกล่าวไม่เป็นผู้มีร่างกายทุพพลภาพจนไม่สามารถปฏิบัติหน้าที่ได้ "
+        "ไม่ปรากฏอาการของโรคจิตหรือจิตฟั่นเฟือนหรือปัญญาอ่อน ไม่ปรากฏอาการติดยาเสพติดให้โทษ "
+        "หรือโรคพิษสุราเรื้อรัง และไม่ปรากฏอาการของโรคต่อไปนี้",
+        size=small_size,
+    )
+    text_line("1. โรคเรื้อนในระยะติดต่อ หรือระยะที่ปรากฏอาการเป็นที่รังเกียจแก่สังคม", size=small_size)
+    text_line("2. วัณโรคในระยะอันตราย", size=small_size)
+    text_line("3. โรคเท้าช้างในระยะที่ปรากฏอาการเป็นที่รังเกียจแก่สังคม", size=small_size)
+    text_line(f"4. อื่น ๆ ถ้ามี {row.get('other_exam', '')}", size=small_size)
+    wrapped(f"สรุปความคิดเห็นและข้อแนะนำของแพทย์ {row.get('doctor_opinion', '')}", size=body_size)
+
+    y -= 5
+    text_line(
+        f"ลงชื่อ ........................................................ แพทย์ผู้ตรวจ ({row.get('doctor_name', '')})",
+        align="right",
+        size=small_size,
+    )
+    text_line("หมายเหตุ: ประทับตราสถานพยาบาลหลังพิมพ์เอกสาร", size=9.8)
+
+    pdf.showPage()
+    pdf.save()
+    buffer.seek(0)
+    return buffer
 
 
 def dataframe_for_dashboard(source_df):
@@ -1328,27 +1450,19 @@ elif page == "พยาบาล/แพทย์":
         certificate_html = build_certificate_html(current_row)
         st.markdown(certificate_html, unsafe_allow_html=True)
 
-        if WEASYPRINT_AVAILABLE:
-            try:
-                pdf_buffer = create_certificate_pdf(current_row)
-                st.download_button(
-                    label="ดาวน์โหลด PDF เพื่อพิมพ์",
-                    data=pdf_buffer.getvalue(),
-                    file_name=f"medical_certificate_{current_row.get('record_id', '')}.pdf",
-                    mime="application/pdf",
-                    type="primary",
-                    key=f"doctor_download_{current_row.get('record_id', '')}",
-                )
-            except Exception as error:
-                st.error(f"สร้าง PDF ไม่สำเร็จ: {error}")
-        else:
-            st.error("ไม่สามารถโหลด WeasyPrint จึงยังสร้าง PDF ไม่ได้")
-            if WEASYPRINT_IMPORT_ERROR:
-                st.code(WEASYPRINT_IMPORT_ERROR)
-            st.info(
-                "ตรวจสอบว่า repository มีทั้ง requirements.txt และ packages.txt "
-                "จากนั้น Reboot หรือ Redeploy แอป"
+        try:
+            pdf_buffer = create_certificate_pdf(current_row)
+            st.download_button(
+                label="ดาวน์โหลด PDF เพื่อพิมพ์",
+                data=pdf_buffer.getvalue(),
+                file_name=f"medical_certificate_{current_row.get('record_id', '')}.pdf",
+                mime="application/pdf",
+                type="primary",
+                key=f"doctor_download_{current_row.get('record_id', '')}",
             )
+        except Exception as error:
+            st.error(f"สร้าง PDF ไม่สำเร็จ: {error}")
+            st.info("กรุณาตรวจสอบว่ามีไฟล์ THSarabunNew.ttf อยู่ใน repository เดียวกับ MedCert.py")
 
         if current_row.get("status") == "printed":
             printed_time = parse_iso_datetime(current_row.get("printed_at_bkk", ""))
@@ -1374,3 +1488,4 @@ elif page == "พยาบาล/แพทย์":
                 st.rerun()
             except Exception as error:
                 st.error(f"บันทึกข้อมูลไม่สำเร็จ: {error}")
+
