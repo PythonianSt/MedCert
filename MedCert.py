@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 
 
 
@@ -322,13 +323,130 @@ def valid_positive_number(value, minimum, maximum):
         return False
 
 
+def render_qr_scanner(key_prefix):
+    """เปิดกล้องในเบราว์เซอร์และส่งค่าจาก QR กลับผ่าน query parameter
+
+    ใช้ BarcodeDetector ของเบราว์เซอร์ จึงไม่ต้องใช้ OpenCV/NumPy
+    และไม่เพิ่ม native dependency ให้ Streamlit server
+    """
+    param_name = f"qr_{key_prefix}"
+    state_key = f"{key_prefix}_scanned_record_id"
+
+    scanned_value = st.query_params.get(param_name, "")
+    if isinstance(scanned_value, list):
+        scanned_value = scanned_value[0] if scanned_value else ""
+
+    if scanned_value:
+        st.session_state[state_key] = str(scanned_value).strip().upper()
+        try:
+            del st.query_params[param_name]
+        except Exception:
+            pass
+        st.rerun()
+
+    scanner_html = f"""
+    <div style="font-family:Arial,sans-serif;border:1px solid #d0d7de;border-radius:10px;padding:12px;">
+      <button id="start-{key_prefix}" style="padding:10px 16px;border:0;border-radius:8px;background:#1769aa;color:white;font-size:16px;">
+        เปิดกล้องสแกน QR
+      </button>
+      <button id="stop-{key_prefix}" style="display:none;padding:10px 16px;border:1px solid #999;border-radius:8px;background:white;font-size:16px;margin-left:6px;">
+        ปิดกล้อง
+      </button>
+      <div id="msg-{key_prefix}" style="margin-top:8px;color:#555;">กดปุ่มเพื่อเปิดกล้อง</div>
+      <video id="video-{key_prefix}" playsinline muted style="display:none;width:100%;max-width:460px;margin-top:10px;border-radius:8px;"></video>
+    </div>
+    <script>
+    (() => {{
+      const startBtn = document.getElementById('start-{key_prefix}');
+      const stopBtn = document.getElementById('stop-{key_prefix}');
+      const video = document.getElementById('video-{key_prefix}');
+      const msg = document.getElementById('msg-{key_prefix}');
+      let stream = null;
+      let running = false;
+
+      function stopCamera() {{
+        running = false;
+        if (stream) stream.getTracks().forEach(t => t.stop());
+        stream = null;
+        video.style.display = 'none';
+        stopBtn.style.display = 'none';
+        startBtn.style.display = 'inline-block';
+      }}
+
+      async function begin() {{
+        if (!('BarcodeDetector' in window)) {{
+          msg.innerHTML = 'เบราว์เซอร์นี้ยังไม่รองรับการสแกน QR โดยตรง กรุณาใช้ Chrome/Edge รุ่นใหม่ หรือกรอกรหัสด้านล่าง';
+          return;
+        }}
+        try {{
+          const supported = await BarcodeDetector.getSupportedFormats();
+          if (!supported.includes('qr_code')) {{
+            msg.innerHTML = 'อุปกรณ์นี้ไม่รองรับ QR detector กรุณากรอกรหัสด้านล่าง';
+            return;
+          }}
+          stream = await navigator.mediaDevices.getUserMedia({{
+            video: {{ facingMode: {{ ideal: 'environment' }} }}, audio: false
+          }});
+          video.srcObject = stream;
+          await video.play();
+          video.style.display = 'block';
+          stopBtn.style.display = 'inline-block';
+          startBtn.style.display = 'none';
+          msg.innerHTML = 'เล็งกล้องไปที่ QR code';
+          running = true;
+          const detector = new BarcodeDetector({{formats:['qr_code']}});
+
+          async function scan() {{
+            if (!running) return;
+            try {{
+              const codes = await detector.detect(video);
+              if (codes.length && codes[0].rawValue) {{
+                const value = codes[0].rawValue.trim();
+                msg.innerHTML = 'อ่าน QR สำเร็จ: ' + value;
+                stopCamera();
+                const url = new URL(window.parent.location.href);
+                url.searchParams.set('{param_name}', value);
+                window.parent.location.href = url.toString();
+                return;
+              }}
+            }} catch (e) {{}}
+            requestAnimationFrame(scan);
+          }}
+          scan();
+        }} catch (e) {{
+          msg.innerHTML = 'เปิดกล้องไม่สำเร็จ กรุณาอนุญาตการใช้กล้อง หรือกรอกรหัสด้านล่าง';
+          stopCamera();
+        }}
+      }}
+
+      startBtn.addEventListener('click', begin);
+      stopBtn.addEventListener('click', stopCamera);
+    }})();
+    </script>
+    """
+    components.html(scanner_html, height=390, scrolling=False)
+
+
 def enter_record_id(key_prefix, label="รหัสรายการ"):
-    """กรอกรหัส 8 ตัวอักษรที่แสดงใต้ QR code โดยไม่เปิดกล้อง"""
-    return st.text_input(
+    """สแกน QR ด้วยกล้อง หรือกรอกรหัส 8 ตัวอักษรด้วยตนเอง"""
+    with st.expander("สแกน QR code", expanded=False):
+        render_qr_scanner(key_prefix)
+
+    state_key = f"{key_prefix}_scanned_record_id"
+    widget_key = f"{key_prefix}_record_id"
+    scanned = st.session_state.get(state_key, "")
+    if scanned and widget_key not in st.session_state:
+        st.session_state[widget_key] = scanned
+
+    value = st.text_input(
         label,
         placeholder="เช่น A1B2C3D4",
-        key=f"{key_prefix}_record_id",
+        key=widget_key,
     ).strip().upper()
+
+    if scanned and value == scanned:
+        st.success(f"อ่าน QR สำเร็จ: {scanned}")
+    return value
 
 
 def safe_int(value, default=0):
@@ -404,7 +522,7 @@ def build_certificate_html(row):
     </style>
 
     <div class="certificate-page">
-      <h1>ใบรับรองแพทย์ (สำหรับใบอนุญาตขับรถ)</h1>
+      <h1>ใบรับรองแพทย์</h1>
       <p class="right">เลขที่ <span class="line line-short">&nbsp;</span></p>
       <p><span class="section-label">ส่วนที่ 1</span> <span class="bold">ของผู้ขอรับใบรับรองสุขภาพ</span></p>
       <p>ข้าพเจ้า <span class="line line-long">{h(name_text)}</span> เลขบัตรประชาชน <span class="line">{cid_text}</span></p>
@@ -523,7 +641,7 @@ def create_certificate_pdf(row):
     name_text = f"{row.get('prefix', '')}{row.get('full_name', '')}"
     cid_text = citizen_id_display(row.get("citizen_id", ""))
 
-    text_line("ใบรับรองแพทย์ (สำหรับใบอนุญาตขับรถ)", size=16.5, align="center")
+    text_line("ใบรับรองแพทย์", size=16.5, align="center")
     y += 3
     text_line("เลขที่ ........................................", align="right", size=small_size)
     text_line("ส่วนที่ 1  ของผู้ขอรับใบรับรองสุขภาพ", size=13.2)
@@ -844,8 +962,16 @@ if page == "ผู้รับบริการ":
         st.subheader("แก้ไขวันหรือเวลานัดหมาย")
         st.caption("ใช้รหัสรายการจากใต้ QR code พร้อมเลขบัตรประชาชนและอีเมลเดิม")
 
+        with st.expander("สแกน QR code", expanded=False):
+            render_qr_scanner("edit")
+        edit_scanned = st.session_state.get("edit_scanned_record_id", "")
+
         with st.form("edit_appointment_form"):
-            edit_record_id = st.text_input("รหัสรายการ")
+            edit_record_id = st.text_input(
+                "รหัสรายการ",
+                value=edit_scanned,
+                placeholder="เช่น A1B2C3D4",
+            ).strip().upper()
             edit_citizen_id = st.text_input("เลขบัตรประชาชน 13 หลัก")
             edit_email = st.text_input("อีเมลที่ใช้จอง")
             new_appt_date = st.date_input(
@@ -958,11 +1084,10 @@ elif page == "วัดสัญญาณชีพ":
     st.title("วัดสัญญาณชีพ")
     st.caption("กรอกรหัสรายการจากใต้ QR code แล้วบันทึกค่าที่วัดได้ด้วยตนเอง")
 
-    record_id = st.text_input(
-        "รหัสรายการ",
-        placeholder="เช่น A1B2C3D4",
-        key="vital_manual_record_id",
-    ).strip()
+    record_id = enter_record_id(
+        "vital",
+        "กรอกรหัสรายการจากใต้ QR code",
+    )
 
     if not record_id:
         st.info("กรุณากรอกรหัสรายการจากใต้ QR code")
@@ -1141,10 +1266,12 @@ elif page == "เวชระเบียน":
             format_func=lambda value: "-- เลือกรายการ --" if value == "" else record_label_map[value],
         )
 
-    with st.expander("กรอกรหัสรายการ"):
-        manual_record_id = enter_record_id("registry", "กรอกรหัสรายการจากใต้ QR code")
-        if manual_record_id:
-            selected_record_id = manual_record_id
+    manual_record_id = enter_record_id(
+        "registry",
+        "กรอกรหัสรายการจากใต้ QR code",
+    )
+    if manual_record_id:
+        selected_record_id = manual_record_id
 
     if selected_record_id:
         idx = find_by_record(df, selected_record_id)
@@ -1490,5 +1617,6 @@ elif page == "พยาบาล/แพทย์":
                 st.rerun()
             except Exception as error:
                 st.error(f"บันทึกข้อมูลไม่สำเร็จ: {error}")
+
 
 
