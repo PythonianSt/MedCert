@@ -8,13 +8,10 @@ from pathlib import Path
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
-import cv2
-import numpy as np
 import pandas as pd
 import qrcode
 import requests
 import streamlit as st
-from PIL import Image
 
 WEASYPRINT_IMPORT_ERROR = ""
 try:
@@ -305,18 +302,6 @@ def password_gate(correct_password, key):
         st.stop()
 
 
-def read_qr_from_image(uploaded_file):
-    try:
-        image = Image.open(uploaded_file).convert("RGB")
-        image_array = np.array(image)
-        image_bgr = cv2.cvtColor(image_array, cv2.COLOR_RGB2BGR)
-        detector = cv2.QRCodeDetector()
-        data, _, _ = detector.detectAndDecode(image_bgr)
-        return data.strip() if data else ""
-    except Exception:
-        return ""
-
-
 
 def valid_bp(value):
     text = str(value).strip()
@@ -344,27 +329,13 @@ def valid_positive_number(value, minimum, maximum):
         return False
 
 
-def scan_or_enter(key_prefix):
-    camera_image = st.camera_input(
-        "ถ่ายภาพ QR code",
-        key=f"{key_prefix}_camera",
-    )
-
-    qr_text = ""
-    if camera_image is not None:
-        qr_text = read_qr_from_image(camera_image)
-        if qr_text:
-            st.success("อ่าน QR code สำเร็จ")
-            st.code(qr_text)
-        else:
-            st.warning("ยังอ่าน QR ไม่ได้ กรุณาถ่ายใหม่ให้ QR ชัดและอยู่กลางภาพ")
-
-    manual = st.text_input(
-        "หรือกรอกรหัสจาก QR ด้วยตนเอง",
-        key=f"{key_prefix}_manual",
-    )
-
-    return manual.strip() if manual.strip() else qr_text.strip()
+def enter_record_id(key_prefix, label="รหัสรายการ"):
+    """กรอกรหัส 8 ตัวอักษรที่แสดงใต้ QR code โดยไม่เปิดกล้อง"""
+    return st.text_input(
+        label,
+        placeholder="เช่น A1B2C3D4",
+        key=f"{key_prefix}_record_id",
+    ).strip().upper()
 
 
 def safe_int(value, default=0):
@@ -1022,7 +993,7 @@ elif page == "เวชระเบียน":
     st.markdown(
         """
         <div class="dashboard-note">
-            เลือกรายชื่อจากรายการด้านล่าง หรือเปิดกล้องเพื่อสแกน QR code
+            เลือกรายชื่อจากรายการด้านล่าง หรือกรอกรหัสรายการจากใต้ QR code
         </div>
         """,
         unsafe_allow_html=True,
@@ -1045,10 +1016,10 @@ elif page == "เวชระเบียน":
             format_func=lambda value: "-- เลือกรายการ --" if value == "" else record_label_map[value],
         )
 
-    with st.expander("สแกน QR หรือกรอกรหัสรายการ"):
-        scanned_record_id = scan_or_enter("registry")
-        if scanned_record_id:
-            selected_record_id = scanned_record_id
+    with st.expander("กรอกรหัสรายการ"):
+        manual_record_id = enter_record_id("registry", "กรอกรหัสรายการจากใต้ QR code")
+        if manual_record_id:
+            selected_record_id = manual_record_id
 
     if selected_record_id:
         idx = find_by_record(df, selected_record_id)
@@ -1139,13 +1110,13 @@ elif page == "เวชระเบียน":
 
 
 # =====================================================
-# 3. ลงผลตรวจปัสสาวะ
+# 4. ลงผลตรวจปัสสาวะ
 # =====================================================
 elif page == "ลงผลตรวจปัสสาวะ":
     password_gate(PASS_LAB, "password_lab")
     st.title("ลงผลตรวจปัสสาวะ Methamphetamine")
 
-    record_id = scan_or_enter("lab")
+    record_id = enter_record_id("lab", "กรอกรหัสรายการจากใต้ QR code")
     if not record_id:
         st.stop()
 
@@ -1192,13 +1163,13 @@ elif page == "ลงผลตรวจปัสสาวะ":
 
 
 # =====================================================
-# 4. พยาบาล/แพทย์
+# 5. พยาบาล/แพทย์
 # =====================================================
 elif page == "พยาบาล/แพทย์":
     password_gate(PASS_DOC, "password_doctor")
     st.title("แพทย์ตรวจและอนุมัติ")
 
-    record_id = scan_or_enter("doctor")
+    record_id = enter_record_id("doctor", "กรอกรหัสรายการจากใต้ QR code")
     if not record_id:
         st.stop()
 
@@ -1402,12 +1373,3 @@ elif page == "พยาบาล/แพทย์":
                 st.rerun()
             except Exception as error:
                 st.error(f"บันทึกข้อมูลไม่สำเร็จ: {error}")
-
-
-
-
-
-
-
-
-
