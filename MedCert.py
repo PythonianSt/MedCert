@@ -45,7 +45,6 @@ CSV_PATH = st.secrets.get("CSV_PATH", "medical_certificate.csv")
 PASS_REG = st.secrets.get("PASS_REG", "q01")
 PASS_LAB = st.secrets.get("PASS_LAB", "q02")
 PASS_DOC = st.secrets.get("PASS_DOC", "q03")
-PASS_PRINT = st.secrets.get("PASS_PRINT", "q04")
 
 
 DOCTORS = {
@@ -554,7 +553,6 @@ page = st.sidebar.radio(
         "เวชระเบียน",
         "ลงผลตรวจปัสสาวะ",
         "พยาบาล/แพทย์",
-        "พิมพ์",
     ],
 )
 
@@ -1342,68 +1340,69 @@ elif page == "พยาบาล/แพทย์":
         try:
             save_csv(df, sha)
             st.success("แพทย์อนุมัติเรียบร้อยแล้ว")
+            st.rerun()
         except Exception as error:
             st.error(f"บันทึกข้อมูลไม่สำเร็จ: {error}")
 
-
-# =====================================================
-# 5. พิมพ์
-# =====================================================
-elif page == "พิมพ์":
-    password_gate(PASS_PRINT, "password_print")
-    st.title("พิมพ์ใบรับรองแพทย์")
-
-    record_id = scan_or_enter("print")
-    if not record_id:
-        st.stop()
-
-    idx = find_by_record(df, record_id)
-    if idx is None:
-        st.error("ไม่พบข้อมูล")
-        st.stop()
-
-    row = df.loc[idx].to_dict()
-
-    if row.get("status") not in {"doctor_approved", "printed"}:
-        st.warning("รายการนี้ยังไม่ผ่านการอนุมัติจากแพทย์")
-        st.stop()
-
-    # หน้าจอและ PDF ใช้ HTML template เดียวกัน
-    certificate_html = build_certificate_html(row)
-    st.markdown(certificate_html, unsafe_allow_html=True)
-
-    if WEASYPRINT_AVAILABLE:
-        try:
-            pdf_buffer = create_certificate_pdf(row)
-            st.download_button(
-                label="ดาวน์โหลด PDF เพื่อพิมพ์",
-                data=pdf_buffer.getvalue(),
-                file_name=f"medical_certificate_{row.get('record_id', '')}.pdf",
-                mime="application/pdf",
-                type="primary",
-            )
-        except Exception as error:
-            st.error(f"สร้าง PDF ไม่สำเร็จ: {error}")
-    else:
-        st.error("ไม่สามารถโหลด WeasyPrint จึงยังสร้าง PDF ไม่ได้")
-        if WEASYPRINT_IMPORT_ERROR:
-            st.code(WEASYPRINT_IMPORT_ERROR)
-        st.info(
-            "ตรวจสอบว่า repository มีทั้ง requirements.txt และ packages.txt "
-            "จากนั้น Reboot หรือ Redeploy แอป"
+    # Preview และสั่งพิมพ์อยู่ในหน้าแพทย์เดียวกัน
+    current_row = df.loc[idx].to_dict()
+    if current_row.get("status") in {"doctor_approved", "printed"}:
+        st.divider()
+        st.subheader("Preview ใบรับรองแพทย์")
+        st.caption(
+            "ตรวจสอบข้อมูลก่อนพิมพ์ จากนั้นดาวน์โหลด PDF และสั่งพิมพ์จากโทรศัพท์ของแพทย์ได้ทันที"
         )
 
-    if st.button("บันทึกว่าพิมพ์แล้ว"):
-        timestamp = now_bkk().isoformat()
-        df.loc[idx, "printed_at_bkk"] = timestamp
-        df.loc[idx, "last_modified_at_bkk"] = timestamp
-        df.loc[idx, "status"] = "printed"
+        certificate_html = build_certificate_html(current_row)
+        st.markdown(certificate_html, unsafe_allow_html=True)
 
-        try:
-            save_csv(df, sha)
-            st.success("บันทึกสถานะพิมพ์แล้ว")
-        except Exception as error:
-            st.error(f"บันทึกข้อมูลไม่สำเร็จ: {error}")
+        if WEASYPRINT_AVAILABLE:
+            try:
+                pdf_buffer = create_certificate_pdf(current_row)
+                st.download_button(
+                    label="ดาวน์โหลด PDF เพื่อพิมพ์",
+                    data=pdf_buffer.getvalue(),
+                    file_name=f"medical_certificate_{current_row.get('record_id', '')}.pdf",
+                    mime="application/pdf",
+                    type="primary",
+                    key=f"doctor_download_{current_row.get('record_id', '')}",
+                )
+            except Exception as error:
+                st.error(f"สร้าง PDF ไม่สำเร็จ: {error}")
+        else:
+            st.error("ไม่สามารถโหลด WeasyPrint จึงยังสร้าง PDF ไม่ได้")
+            if WEASYPRINT_IMPORT_ERROR:
+                st.code(WEASYPRINT_IMPORT_ERROR)
+            st.info(
+                "ตรวจสอบว่า repository มีทั้ง requirements.txt และ packages.txt "
+                "จากนั้น Reboot หรือ Redeploy แอป"
+            )
+
+        if current_row.get("status") == "printed":
+            printed_time = parse_iso_datetime(current_row.get("printed_at_bkk", ""))
+            if printed_time:
+                st.success(
+                    "บันทึกว่าพิมพ์แล้วเมื่อ "
+                    f"{printed_time.strftime('%d/%m/%Y %H:%M')} น."
+                )
+            else:
+                st.success("บันทึกสถานะพิมพ์แล้ว")
+        elif st.button(
+            "บันทึกว่าพิมพ์แล้ว",
+            key=f"doctor_mark_printed_{current_row.get('record_id', '')}",
+        ):
+            timestamp = now_bkk().isoformat()
+            df.loc[idx, "printed_at_bkk"] = timestamp
+            df.loc[idx, "last_modified_at_bkk"] = timestamp
+            df.loc[idx, "status"] = "printed"
+
+            try:
+                save_csv(df, sha)
+                st.success("บันทึกสถานะพิมพ์แล้ว")
+                st.rerun()
+            except Exception as error:
+                st.error(f"บันทึกข้อมูลไม่สำเร็จ: {error}")
+
 
 
 
