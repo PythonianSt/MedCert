@@ -9,14 +9,9 @@ from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-import qrcode
 import requests
 import streamlit as st
 
-from reportlab.lib.pagesizes import A4
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.pdfgen import canvas
 
 
 # =====================================================
@@ -275,6 +270,8 @@ def edits_used_today(df, citizen_id):
 
 
 def make_qr(record_id):
+    # Lazy import: โหลด qrcode/Pillow เฉพาะเมื่อสร้าง QR หลังจองสำเร็จ
+    import qrcode
     image = qrcode.make(record_id)
     buffer = BytesIO()
     image.save(buffer, format="PNG")
@@ -438,8 +435,8 @@ def build_certificate_html(row):
     """
 
 
-def _reportlab_font_name():
-    """Register the Thai font bundled with the repository."""
+def _reportlab_font_name(pdfmetrics, TTFont):
+    """Register the Thai font bundled with the repository (lazy ReportLab import)."""
     candidates = [
         Path("THSarabunNew.ttf"),
         Path(__file__).resolve().parent / "THSarabunNew.ttf",
@@ -455,7 +452,7 @@ def _reportlab_font_name():
     )
 
 
-def _wrap_text(text, font_name, font_size, max_width):
+def _wrap_text(text, font_name, font_size, max_width, pdfmetrics):
     text = str(text or "").strip()
     if not text:
         return [""]
@@ -475,8 +472,13 @@ def _wrap_text(text, font_name, font_size, max_width):
 
 
 def create_certificate_pdf(row):
-    """Create a one-page A4 Thai medical certificate with ReportLab."""
-    font_name = _reportlab_font_name()
+    """Create a one-page A4 Thai medical certificate. ReportLab is imported only here."""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    from reportlab.pdfgen import canvas
+
+    font_name = _reportlab_font_name(pdfmetrics, TTFont)
     buffer = BytesIO()
     pdf = canvas.Canvas(buffer, pagesize=A4)
     page_width, page_height = A4
@@ -503,7 +505,7 @@ def create_certificate_pdf(row):
         nonlocal y
         width = width or (right - x)
         pdf.setFont(font_name, size)
-        for line in _wrap_text(text, font_name, size, width - indent):
+        for line in _wrap_text(text, font_name, size, width - indent, pdfmetrics):
             pdf.drawString(x + indent, y, line)
             y -= leading
         y -= gap
@@ -1488,4 +1490,5 @@ elif page == "พยาบาล/แพทย์":
                 st.rerun()
             except Exception as error:
                 st.error(f"บันทึกข้อมูลไม่สำเร็จ: {error}")
+
 
