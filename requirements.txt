@@ -1,7 +1,7 @@
 streamlit==1.55.0
-pandas==3.0.3
-requests==2.34.2
-qrcode==8.2
-Pillow==12.3.0
-reportlab==4.4.3
-python-dateutil==2.9.0.post0
+pandas
+requests
+qrcode
+Pillow
+reportlab
+python-dateutil
