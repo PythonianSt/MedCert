@@ -653,7 +653,9 @@ def create_certificate_pdf(row):
         y -= 9
 
     def mark(value, target):
-        return "☑" if str(value) == target else "☐"
+        # ใช้ตัวอักษร ASCII แทนสัญลักษณ์ checkbox Unicode
+        # เพราะฟอนต์ THSarabunNew บางรุ่นไม่มี glyph ของ ☑/☐ ทำให้ PDF แสดงช่องว่าง
+        return "[X]" if str(value) == target else "[ ]"
 
     issue_date = thai_date(get_issue_date(row))
     name_text = f"{row.get('prefix', '')}{row.get('full_name', '')}"
@@ -1755,6 +1757,7 @@ elif page == "พยาบาล/แพทย์":
                 st.rerun()
             except Exception as error:
                 st.error(f"บันทึกข้อมูลไม่สำเร็จ: {error}")
+
 
 
 
