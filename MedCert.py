@@ -11,7 +11,8 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import requests
 import streamlit as st
-import streamlit.components.v1 as components
+import cv2
+import numpy as np
 
 
 
@@ -323,115 +324,50 @@ def valid_positive_number(value, minimum, maximum):
         return False
 
 
-def render_qr_scanner(key_prefix):
-    """เปิดกล้องในเบราว์เซอร์และส่งค่าจาก QR กลับผ่าน query parameter
+def read_qr_from_image(uploaded_img):
+    """อ่าน QR code จากภาพที่ถ่ายด้วย st.camera_input โดยใช้ OpenCV QRCodeDetector"""
+    if uploaded_img is None:
+        return ""
 
-    ตัวสแกนจะถูกสร้างเฉพาะเมื่อผู้ใช้เลือก "สแกน QR code" เพื่อลดการสร้าง
-    HTML component โดยไม่จำเป็น และเมื่ออ่านสำเร็จจะเติมรหัสลงในช่องกรอกทันที
-    """
-    param_name = f"qr_{key_prefix}"
+    file_bytes = np.asarray(
+        bytearray(uploaded_img.getvalue()),
+        dtype=np.uint8,
+    )
+    image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+    if image is None:
+        return ""
+
+    detector = cv2.QRCodeDetector()
+    data, _, _ = detector.detectAndDecode(image)
+    return str(data).strip().upper() if data else ""
+
+
+def render_qr_scanner(key_prefix):
+    """แสดงกล้องถ่าย QR และเติมค่าที่อ่านได้ลง session state ของช่องรหัส"""
     state_key = f"{key_prefix}_scanned_record_id"
     widget_key = f"{key_prefix}_record_id"
+    camera_key = f"{key_prefix}_qr_camera"
 
-    scanned_value = st.query_params.get(param_name, "")
-    if isinstance(scanned_value, list):
-        scanned_value = scanned_value[0] if scanned_value else ""
+    qr_image = st.camera_input(
+        "ถ่ายภาพ QR code ให้ชัดและอยู่กลางภาพ",
+        key=camera_key,
+    )
 
-    if scanned_value:
-        scanned = str(scanned_value).strip().upper()
-        st.session_state[state_key] = scanned
-        st.session_state[widget_key] = scanned
-        try:
-            del st.query_params[param_name]
-        except Exception:
-            pass
-        st.rerun()
-
-    scanner_html = f"""
-    <div style="font-family:Arial,sans-serif;border:1px solid #d0d7de;border-radius:10px;padding:12px;">
-      <button id="start-{key_prefix}" style="padding:10px 16px;border:0;border-radius:8px;background:#1769aa;color:white;font-size:16px;">
-        เปิดกล้องสแกน QR
-      </button>
-      <button id="stop-{key_prefix}" style="display:none;padding:10px 16px;border:1px solid #999;border-radius:8px;background:white;font-size:16px;margin-left:6px;">
-        ปิดกล้อง
-      </button>
-      <div id="msg-{key_prefix}" style="margin-top:8px;color:#555;">กดปุ่มเพื่อเปิดกล้อง</div>
-      <video id="video-{key_prefix}" playsinline muted style="display:none;width:100%;max-width:460px;margin-top:10px;border-radius:8px;"></video>
-    </div>
-    <script>
-    (() => {{
-      const startBtn = document.getElementById('start-{key_prefix}');
-      const stopBtn = document.getElementById('stop-{key_prefix}');
-      const video = document.getElementById('video-{key_prefix}');
-      const msg = document.getElementById('msg-{key_prefix}');
-      let stream = null;
-      let running = false;
-
-      function stopCamera() {{
-        running = false;
-        if (stream) stream.getTracks().forEach(t => t.stop());
-        stream = null;
-        video.style.display = 'none';
-        stopBtn.style.display = 'none';
-        startBtn.style.display = 'inline-block';
-      }}
-
-      async function begin() {{
-        if (!('BarcodeDetector' in window)) {{
-          msg.innerHTML = 'เบราว์เซอร์นี้ยังไม่รองรับการสแกน QR โดยตรง กรุณาเลือกกรอกเอง';
-          return;
-        }}
-        try {{
-          const supported = await BarcodeDetector.getSupportedFormats();
-          if (!supported.includes('qr_code')) {{
-            msg.innerHTML = 'อุปกรณ์นี้ไม่รองรับ QR detector กรุณาเลือกกรอกเอง';
-            return;
-          }}
-          stream = await navigator.mediaDevices.getUserMedia({{
-            video: {{ facingMode: {{ ideal: 'environment' }} }}, audio: false
-          }});
-          video.srcObject = stream;
-          await video.play();
-          video.style.display = 'block';
-          stopBtn.style.display = 'inline-block';
-          startBtn.style.display = 'none';
-          msg.innerHTML = 'เล็งกล้องไปที่ QR code';
-          running = true;
-          const detector = new BarcodeDetector({{formats:['qr_code']}});
-
-          async function scan() {{
-            if (!running) return;
-            try {{
-              const codes = await detector.detect(video);
-              if (codes.length && codes[0].rawValue) {{
-                const value = codes[0].rawValue.trim();
-                msg.innerHTML = 'อ่าน QR สำเร็จ: ' + value;
-                stopCamera();
-                const url = new URL(window.parent.location.href);
-                url.searchParams.set('{param_name}', value);
-                window.parent.location.href = url.toString();
-                return;
-              }}
-            }} catch (e) {{}}
-            requestAnimationFrame(scan);
-          }}
-          scan();
-        }} catch (e) {{
-          msg.innerHTML = 'เปิดกล้องไม่สำเร็จ กรุณาอนุญาตการใช้กล้อง หรือเลือกกรอกเอง';
-          stopCamera();
-        }}
-      }}
-
-      startBtn.addEventListener('click', begin);
-      stopBtn.addEventListener('click', stopCamera);
-    }})();
-    </script>
-    """
-    components.html(scanner_html, height=390, scrolling=False)
+    if qr_image:
+        qr_value = read_qr_from_image(qr_image)
+        if qr_value:
+            st.session_state[state_key] = qr_value
+            st.session_state[widget_key] = qr_value
+            st.success(f"อ่าน QR สำเร็จ: {qr_value}")
+        else:
+            st.error(
+                "ยังอ่าน QR code ไม่ได้ กรุณาถ่ายใหม่ให้ QR ชัด "
+                "มีแสงเพียงพอ และอยู่กลางภาพ"
+            )
 
 
 def enter_record_id(key_prefix, label="รหัสรายการ"):
-    """เลือกสแกน QR หรือกรอกเอง โดยค่าที่สแกนได้จะถูกเติมลงช่องรหัสทันที"""
+    """เลือกถ่าย QR หรือกรอกเอง โดยผลสแกนจะเติมลงช่องรหัสทันที"""
     mode_key = f"{key_prefix}_input_mode"
     widget_key = f"{key_prefix}_record_id"
     state_key = f"{key_prefix}_scanned_record_id"
@@ -444,26 +380,26 @@ def enter_record_id(key_prefix, label="รหัสรายการ"):
     )
 
     if mode == "สแกน QR code":
-        with st.expander("เปิดกล้องสแกน QR code", expanded=True):
-            render_qr_scanner(key_prefix)
-
+        render_qr_scanner(key_prefix)
         scanned = st.session_state.get(state_key, "")
         if scanned:
             st.session_state[widget_key] = scanned
     else:
-        # ผู้ใช้ตั้งใจกรอกเอง จึงไม่บังคับค่าจากการสแกนครั้งก่อน
-        if st.session_state.get(state_key) and st.session_state.get(widget_key) == st.session_state.get(state_key):
+        # เมื่อเลือกกรอกเอง ผู้ใช้สามารถแก้ไขหรือแทนค่าที่เคยสแกนได้อย่างอิสระ
+        if (
+            st.session_state.get(state_key)
+            and st.session_state.get(widget_key)
+            == st.session_state.get(state_key)
+        ):
             st.session_state[widget_key] = ""
 
     value = st.text_input(
         label,
         placeholder="เช่น A1B2C3D4",
         key=widget_key,
-        help="เมื่อสแกนสำเร็จ ระบบจะเติมรหัสลงช่องนี้ทันที",
+        help="เมื่ออ่าน QR สำเร็จ ระบบจะเติมรหัสลงช่องนี้โดยอัตโนมัติ",
     ).strip().upper()
 
-    if mode == "สแกน QR code" and value:
-        st.success(f"รหัสจาก QR: {value}")
     return value
 
 def safe_int(value, default=0):
@@ -959,28 +895,12 @@ if page == "ผู้รับบริการ":
         st.subheader("แก้ไขวันหรือเวลานัดหมาย")
         st.caption("ใช้รหัสรายการจากใต้ QR code พร้อมเลขบัตรประชาชนและอีเมลเดิม")
 
-        edit_mode = st.radio(
-            "วิธีระบุรหัสรายการ",
-            ["สแกน QR code", "กรอกเอง"],
-            horizontal=True,
-            key="edit_input_mode",
+        edit_record_id = enter_record_id(
+            "edit",
+            "รหัสรายการ",
         )
-        if edit_mode == "สแกน QR code":
-            with st.expander("เปิดกล้องสแกน QR code", expanded=True):
-                render_qr_scanner("edit")
-        elif (
-            st.session_state.get("edit_scanned_record_id")
-            and st.session_state.get("edit_record_id")
-            == st.session_state.get("edit_scanned_record_id")
-        ):
-            st.session_state["edit_record_id"] = ""
 
         with st.form("edit_appointment_form"):
-            edit_record_id = st.text_input(
-                "รหัสรายการ",
-                placeholder="เช่น A1B2C3D4",
-                key="edit_record_id",
-            ).strip().upper()
             edit_citizen_id = st.text_input("เลขบัตรประชาชน 13 หลัก")
             edit_email = st.text_input("อีเมลที่ใช้จอง")
             new_appt_date = st.date_input(
