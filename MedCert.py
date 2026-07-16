@@ -326,18 +326,21 @@ def valid_positive_number(value, minimum, maximum):
 def render_qr_scanner(key_prefix):
     """เปิดกล้องในเบราว์เซอร์และส่งค่าจาก QR กลับผ่าน query parameter
 
-    ใช้ BarcodeDetector ของเบราว์เซอร์ จึงไม่ต้องใช้ OpenCV/NumPy
-    และไม่เพิ่ม native dependency ให้ Streamlit server
+    ตัวสแกนจะถูกสร้างเฉพาะเมื่อผู้ใช้เลือก "สแกน QR code" เพื่อลดการสร้าง
+    HTML component โดยไม่จำเป็น และเมื่ออ่านสำเร็จจะเติมรหัสลงในช่องกรอกทันที
     """
     param_name = f"qr_{key_prefix}"
     state_key = f"{key_prefix}_scanned_record_id"
+    widget_key = f"{key_prefix}_record_id"
 
     scanned_value = st.query_params.get(param_name, "")
     if isinstance(scanned_value, list):
         scanned_value = scanned_value[0] if scanned_value else ""
 
     if scanned_value:
-        st.session_state[state_key] = str(scanned_value).strip().upper()
+        scanned = str(scanned_value).strip().upper()
+        st.session_state[state_key] = scanned
+        st.session_state[widget_key] = scanned
         try:
             del st.query_params[param_name]
         except Exception:
@@ -375,13 +378,13 @@ def render_qr_scanner(key_prefix):
 
       async function begin() {{
         if (!('BarcodeDetector' in window)) {{
-          msg.innerHTML = 'เบราว์เซอร์นี้ยังไม่รองรับการสแกน QR โดยตรง กรุณาใช้ Chrome/Edge รุ่นใหม่ หรือกรอกรหัสด้านล่าง';
+          msg.innerHTML = 'เบราว์เซอร์นี้ยังไม่รองรับการสแกน QR โดยตรง กรุณาเลือกกรอกเอง';
           return;
         }}
         try {{
           const supported = await BarcodeDetector.getSupportedFormats();
           if (!supported.includes('qr_code')) {{
-            msg.innerHTML = 'อุปกรณ์นี้ไม่รองรับ QR detector กรุณากรอกรหัสด้านล่าง';
+            msg.innerHTML = 'อุปกรณ์นี้ไม่รองรับ QR detector กรุณาเลือกกรอกเอง';
             return;
           }}
           stream = await navigator.mediaDevices.getUserMedia({{
@@ -414,7 +417,7 @@ def render_qr_scanner(key_prefix):
           }}
           scan();
         }} catch (e) {{
-          msg.innerHTML = 'เปิดกล้องไม่สำเร็จ กรุณาอนุญาตการใช้กล้อง หรือกรอกรหัสด้านล่าง';
+          msg.innerHTML = 'เปิดกล้องไม่สำเร็จ กรุณาอนุญาตการใช้กล้อง หรือเลือกกรอกเอง';
           stopCamera();
         }}
       }}
@@ -428,26 +431,40 @@ def render_qr_scanner(key_prefix):
 
 
 def enter_record_id(key_prefix, label="รหัสรายการ"):
-    """สแกน QR ด้วยกล้อง หรือกรอกรหัส 8 ตัวอักษรด้วยตนเอง"""
-    with st.expander("สแกน QR code", expanded=False):
-        render_qr_scanner(key_prefix)
-
-    state_key = f"{key_prefix}_scanned_record_id"
+    """เลือกสแกน QR หรือกรอกเอง โดยค่าที่สแกนได้จะถูกเติมลงช่องรหัสทันที"""
+    mode_key = f"{key_prefix}_input_mode"
     widget_key = f"{key_prefix}_record_id"
-    scanned = st.session_state.get(state_key, "")
-    if scanned and widget_key not in st.session_state:
-        st.session_state[widget_key] = scanned
+    state_key = f"{key_prefix}_scanned_record_id"
+
+    mode = st.radio(
+        "วิธีระบุรหัสรายการ",
+        ["สแกน QR code", "กรอกเอง"],
+        horizontal=True,
+        key=mode_key,
+    )
+
+    if mode == "สแกน QR code":
+        with st.expander("เปิดกล้องสแกน QR code", expanded=True):
+            render_qr_scanner(key_prefix)
+
+        scanned = st.session_state.get(state_key, "")
+        if scanned:
+            st.session_state[widget_key] = scanned
+    else:
+        # ผู้ใช้ตั้งใจกรอกเอง จึงไม่บังคับค่าจากการสแกนครั้งก่อน
+        if st.session_state.get(state_key) and st.session_state.get(widget_key) == st.session_state.get(state_key):
+            st.session_state[widget_key] = ""
 
     value = st.text_input(
         label,
         placeholder="เช่น A1B2C3D4",
         key=widget_key,
+        help="เมื่อสแกนสำเร็จ ระบบจะเติมรหัสลงช่องนี้ทันที",
     ).strip().upper()
 
-    if scanned and value == scanned:
-        st.success(f"อ่าน QR สำเร็จ: {scanned}")
+    if mode == "สแกน QR code" and value:
+        st.success(f"รหัสจาก QR: {value}")
     return value
-
 
 def safe_int(value, default=0):
     try:
@@ -534,6 +551,7 @@ def build_certificate_html(row):
       <p>3. เคยรักษาในโรงพยาบาล {checked(row.get('hospital'), 'ไม่มี')} ไม่มี {checked(row.get('hospital'), 'มี')} มี ระบุ <span class="line">{h(row.get('hospital_detail', ''))}</span></p>
       <p>4. โรคลมชัก * {checked(row.get('epilepsy'), 'ไม่มี')} ไม่มี {checked(row.get('epilepsy'), 'มี')} มี ระบุ <span class="line">{h(row.get('epilepsy_detail', ''))}</span></p>
       <p>5. ประวัติอื่นที่สำคัญ {checked(row.get('other_history'), 'ไม่มี')} ไม่มี {checked(row.get('other_history'), 'มี')} มี ระบุ <span class="line">{h(row.get('other_history_detail', ''))}</span></p>
+      <p class="small-note">* ในกรณีโรคลมชัก ให้แนบประวัติการรักษาจากแพทย์ผู้รักษาว่าท่านปลอดจากอาการชักมากกว่า 1 ปี เพื่ออนุญาตให้ขับรถได้</p>
       <div class="signature-row"><span>ลงชื่อ <span class="line">&nbsp;</span> ผู้ขอรับใบรับรองสุขภาพ</span><span>วันที่ <span class="line line-short">{issue_date}</span></span></div>
 
       <div class="section-divider"></div>
@@ -654,6 +672,11 @@ def create_certificate_pdf(row):
     text_line(f"3. เคยรักษาในโรงพยาบาล {mark(row.get('hospital'), 'ไม่มี')} ไม่มี  {mark(row.get('hospital'), 'มี')} มี  ระบุ {row.get('hospital_detail', '')}")
     text_line(f"4. โรคลมชัก * {mark(row.get('epilepsy'), 'ไม่มี')} ไม่มี  {mark(row.get('epilepsy'), 'มี')} มี  ระบุ {row.get('epilepsy_detail', '')}")
     text_line(f"5. ประวัติอื่นที่สำคัญ {mark(row.get('other_history'), 'ไม่มี')} ไม่มี  {mark(row.get('other_history'), 'มี')} มี  ระบุ {row.get('other_history_detail', '')}")
+    wrapped(
+        "* ในกรณีโรคลมชัก ให้แนบประวัติการรักษาจากแพทย์ผู้รักษาว่า"
+        "ท่านปลอดจากอาการชักมากกว่า 1 ปี เพื่ออนุญาตให้ขับรถได้",
+        size=9.4,
+    )
     text_line(f"ลงชื่อ ........................................................ ผู้ขอรับใบรับรองสุขภาพ     วันที่ {issue_date}", align="right", size=small_size)
 
     divider()
@@ -826,40 +849,12 @@ if page == "ผู้รับบริการ":
                 st.text_input("ระบุวัตถุประสงค์อื่น") if purpose == "อื่น ๆ" else ""
             )
 
-            chronic = st.radio("1. โรคประจำตัว", ["ไม่มี", "มี"], horizontal=True)
-            chronic_detail = st.text_input("ระบุโรคประจำตัว") if chronic == "มี" else ""
-
-            accident = st.radio("2. อุบัติเหตุและผ่าตัด", ["ไม่มี", "มี"], horizontal=True)
-            accident_detail = (
-                st.text_input("ระบุอุบัติเหตุ/ผ่าตัด") if accident == "มี" else ""
-            )
-
-            hospital = st.radio(
-                "3. เคยเข้ารับการรักษาในโรงพยาบาล",
-                ["ไม่มี", "มี"],
-                horizontal=True,
-            )
-            hospital_detail = (
-                st.text_input("ระบุรายละเอียดการรักษาในโรงพยาบาล")
-                if hospital == "มี" else ""
-            )
-
-            epilepsy = st.radio("4. โรคลมชัก", ["ไม่มี", "มี"], horizontal=True)
-            epilepsy_detail = (
-                st.text_input("ระบุรายละเอียดโรคลมชัก") if epilepsy == "มี" else ""
-            )
-
-            other_history = st.radio(
-                "5. ประวัติอื่นที่สำคัญ",
-                ["ไม่มี", "มี"],
-                horizontal=True,
-            )
-            other_history_detail = (
-                st.text_input("ระบุประวัติอื่น") if other_history == "มี" else ""
+            st.info(
+                "ประวัติสุขภาพส่วนที่ 1 จะกรอกในวันนัดหมายที่หน้า “วัดสัญญาณชีพ”"
             )
 
             consent = st.checkbox(
-                "ข้าพเจ้ารับรองว่าข้อมูลเป็นความจริง และจะลงนามที่หน้างาน"
+                "ข้าพเจ้ารับรองว่าข้อมูลการนัดหมายเป็นความจริง"
             )
 
             booking_submitted = st.form_submit_button(
@@ -929,16 +924,16 @@ if page == "ผู้รับบริการ":
                 "sex": sex,
                 "address": address.strip(),
                 "purpose": real_purpose,
-                "chronic": chronic,
-                "chronic_detail": chronic_detail.strip(),
-                "accident": accident,
-                "accident_detail": accident_detail.strip(),
-                "hospital": hospital,
-                "hospital_detail": hospital_detail.strip(),
-                "epilepsy": epilepsy,
-                "epilepsy_detail": epilepsy_detail.strip(),
-                "other_history": other_history,
-                "other_history_detail": other_history_detail.strip(),
+                "chronic": "",
+                "chronic_detail": "",
+                "accident": "",
+                "accident_detail": "",
+                "hospital": "",
+                "hospital_detail": "",
+                "epilepsy": "",
+                "epilepsy_detail": "",
+                "other_history": "",
+                "other_history_detail": "",
             }
 
             try:
@@ -962,15 +957,27 @@ if page == "ผู้รับบริการ":
         st.subheader("แก้ไขวันหรือเวลานัดหมาย")
         st.caption("ใช้รหัสรายการจากใต้ QR code พร้อมเลขบัตรประชาชนและอีเมลเดิม")
 
-        with st.expander("สแกน QR code", expanded=False):
-            render_qr_scanner("edit")
-        edit_scanned = st.session_state.get("edit_scanned_record_id", "")
+        edit_mode = st.radio(
+            "วิธีระบุรหัสรายการ",
+            ["สแกน QR code", "กรอกเอง"],
+            horizontal=True,
+            key="edit_input_mode",
+        )
+        if edit_mode == "สแกน QR code":
+            with st.expander("เปิดกล้องสแกน QR code", expanded=True):
+                render_qr_scanner("edit")
+        elif (
+            st.session_state.get("edit_scanned_record_id")
+            and st.session_state.get("edit_record_id")
+            == st.session_state.get("edit_scanned_record_id")
+        ):
+            st.session_state["edit_record_id"] = ""
 
         with st.form("edit_appointment_form"):
             edit_record_id = st.text_input(
                 "รหัสรายการ",
-                value=edit_scanned,
                 placeholder="เช่น A1B2C3D4",
+                key="edit_record_id",
             ).strip().upper()
             edit_citizen_id = st.text_input("เลขบัตรประชาชน 13 หลัก")
             edit_email = st.text_input("อีเมลที่ใช้จอง")
@@ -1153,19 +1160,97 @@ elif page == "วัดสัญญาณชีพ":
                 "BW (kg)",
                 value=row.get("vital_weight", ""),
             )
+            vital_height = st.text_input(
+                "Ht (cm)",
+                value=row.get("vital_height", ""),
+            )
         with c2:
             vital_pulse = st.text_input(
                 "P (ครั้ง/นาที)",
                 value=row.get("vital_pulse", ""),
             )
-            vital_height = st.text_input(
-                "Ht (cm)",
-                value=row.get("vital_height", ""),
-            )
 
-        confirmed = st.checkbox("ตรวจสอบความถูกต้องของค่าที่กรอกแล้ว")
+        st.divider()
+        st.subheader("ส่วนที่ 1 ของผู้ขอรับใบรับรองสุขภาพ")
+        st.caption("กรุณาเลือก “ไม่มี” หรือ “มี” และระบุรายละเอียดเมื่อเลือก “มี”")
+
+        chronic = st.radio(
+            "1. โรคประจำตัว",
+            ["ไม่มี", "มี"],
+            index=1 if row.get("chronic", "") == "มี" else 0,
+            horizontal=True,
+            key="vital_chronic",
+        )
+        chronic_detail = st.text_input(
+            "ระบุโรคประจำตัว",
+            value=row.get("chronic_detail", ""),
+            disabled=chronic != "มี",
+        )
+
+        accident = st.radio(
+            "2. อุบัติเหตุและผ่าตัด",
+            ["ไม่มี", "มี"],
+            index=1 if row.get("accident", "") == "มี" else 0,
+            horizontal=True,
+            key="vital_accident",
+        )
+        accident_detail = st.text_input(
+            "ระบุอุบัติเหตุและ/หรือการผ่าตัด",
+            value=row.get("accident_detail", ""),
+            disabled=accident != "มี",
+        )
+
+        hospital = st.radio(
+            "3. เคยเข้ารับการรักษาในโรงพยาบาล",
+            ["ไม่มี", "มี"],
+            index=1 if row.get("hospital", "") == "มี" else 0,
+            horizontal=True,
+            key="vital_hospital",
+        )
+        hospital_detail = st.text_input(
+            "ระบุรายละเอียดการรักษาในโรงพยาบาล",
+            value=row.get("hospital_detail", ""),
+            disabled=hospital != "มี",
+        )
+
+        epilepsy = st.radio(
+            "4. โรคลมชัก*",
+            ["ไม่มี", "มี"],
+            index=1 if row.get("epilepsy", "") == "มี" else 0,
+            horizontal=True,
+            key="vital_epilepsy",
+        )
+        epilepsy_detail = st.text_input(
+            "ระบุรายละเอียดโรคลมชัก",
+            value=row.get("epilepsy_detail", ""),
+            disabled=epilepsy != "มี",
+        )
+
+        other_history = st.radio(
+            "5. ประวัติอื่นที่สำคัญ",
+            ["ไม่มี", "มี"],
+            index=1 if row.get("other_history", "") == "มี" else 0,
+            horizontal=True,
+            key="vital_other_history",
+        )
+        other_history_detail = st.text_input(
+            "ระบุประวัติอื่นที่สำคัญ",
+            value=row.get("other_history_detail", ""),
+            disabled=other_history != "มี",
+        )
+
+        st.info(
+            "* ในกรณีโรคลมชัก ให้แนบประวัติการรักษาจากแพทย์ผู้รักษาว่า"
+            "ท่านปลอดจากอาการชักมากกว่า 1 ปี เพื่ออนุญาตให้ขับรถได้"
+        )
+        st.write("ลงชื่อ ........................................................ ผู้ขอรับใบรับรองสุขภาพ")
+        st.caption("เว้นว่างไว้เพื่อลงนามบนเอกสารฉบับพิมพ์")
+
+        confirmed = st.checkbox(
+            "ข้าพเจ้าตรวจสอบสัญญาณชีพและรับรองว่าประวัติสุขภาพข้างต้นเป็นความจริง"
+        )
         save_vitals = st.form_submit_button(
-            "บันทึกสัญญาณชีพ",
+            "บันทึกสัญญาณชีพและประวัติสุขภาพ",
             type="primary",
         )
 
@@ -1186,12 +1271,36 @@ elif page == "วัดสัญญาณชีพ":
             st.error("กรุณาตรวจสอบค่า Ht")
             st.stop()
 
+        required_details = [
+            (chronic, chronic_detail, "กรุณาระบุโรคประจำตัว"),
+            (accident, accident_detail, "กรุณาระบุอุบัติเหตุหรือการผ่าตัด"),
+            (hospital, hospital_detail, "กรุณาระบุรายละเอียดการรักษาในโรงพยาบาล"),
+            (epilepsy, epilepsy_detail, "กรุณาระบุรายละเอียดโรคลมชัก"),
+            (other_history, other_history_detail, "กรุณาระบุประวัติอื่นที่สำคัญ"),
+        ]
+        for answer, detail, message in required_details:
+            if answer == "มี" and not detail.strip():
+                st.error(message)
+                st.stop()
+
         timestamp = now_bkk().isoformat()
         df.loc[idx, "vital_bp"] = vital_bp.strip()
         df.loc[idx, "vital_pulse"] = vital_pulse.strip()
         df.loc[idx, "vital_weight"] = vital_weight.strip()
         df.loc[idx, "vital_height"] = vital_height.strip()
         df.loc[idx, "vital_ai_raw"] = ""
+        df.loc[idx, "chronic"] = chronic
+        df.loc[idx, "chronic_detail"] = chronic_detail.strip() if chronic == "มี" else ""
+        df.loc[idx, "accident"] = accident
+        df.loc[idx, "accident_detail"] = accident_detail.strip() if accident == "มี" else ""
+        df.loc[idx, "hospital"] = hospital
+        df.loc[idx, "hospital_detail"] = hospital_detail.strip() if hospital == "มี" else ""
+        df.loc[idx, "epilepsy"] = epilepsy
+        df.loc[idx, "epilepsy_detail"] = epilepsy_detail.strip() if epilepsy == "มี" else ""
+        df.loc[idx, "other_history"] = other_history
+        df.loc[idx, "other_history_detail"] = (
+            other_history_detail.strip() if other_history == "มี" else ""
+        )
         df.loc[idx, "vital_checked_at_bkk"] = timestamp
         df.loc[idx, "last_modified_at_bkk"] = timestamp
 
@@ -1443,6 +1552,35 @@ elif page == "พยาบาล/แพทย์":
     if not row.get("urine_meth_result", ""):
         st.warning("ยังไม่มีผลตรวจปัสสาวะ Methamphetamine")
 
+    st.subheader("ส่วนที่ 1 ของผู้ขอรับใบรับรองสุขภาพ")
+    st.write({
+        "1. โรคประจำตัว": (
+            "ไม่มี" if row.get("chronic", "") != "มี"
+            else f"มี — {row.get('chronic_detail', '')}"
+        ),
+        "2. อุบัติเหตุและผ่าตัด": (
+            "ไม่มี" if row.get("accident", "") != "มี"
+            else f"มี — {row.get('accident_detail', '')}"
+        ),
+        "3. เคยเข้ารับการรักษาในโรงพยาบาล": (
+            "ไม่มี" if row.get("hospital", "") != "มี"
+            else f"มี — {row.get('hospital_detail', '')}"
+        ),
+        "4. โรคลมชัก": (
+            "ไม่มี" if row.get("epilepsy", "") != "มี"
+            else f"มี — {row.get('epilepsy_detail', '')}"
+        ),
+        "5. ประวัติอื่นที่สำคัญ": (
+            "ไม่มี" if row.get("other_history", "") != "มี"
+            else f"มี — {row.get('other_history_detail', '')}"
+        ),
+    })
+    if row.get("epilepsy", "") == "มี":
+        st.warning(
+            "กรณีโรคลมชัก: กรุณาตรวจเอกสารจากแพทย์ผู้รักษาว่า"
+            "ปลอดจากอาการชักมากกว่า 1 ปี ก่อนอนุญาตให้ขับรถ"
+        )
+
     if row.get("vital_checked_at_bkk", ""):
         st.subheader("ข้อมูลจากสถานีวัดสัญญาณชีพ")
         st.write({
@@ -1617,6 +1755,7 @@ elif page == "พยาบาล/แพทย์":
                 st.rerun()
             except Exception as error:
                 st.error(f"บันทึกข้อมูลไม่สำเร็จ: {error}")
+
 
 
 
