@@ -176,6 +176,38 @@ def is_workday(day_value):
     return day_value.weekday() < 5
 
 
+def available_time_slots(day_value, reference_time=None):
+    """คืนช่วงเวลาที่ยังจองได้ โดยอ้างอิงเวลา Asia/Bangkok"""
+    reference_time = reference_time or now_bkk()
+    if isinstance(day_value, datetime):
+        day_value = day_value.date()
+
+    # วันอนาคตใช้ได้ทุกช่วงเวลา ส่วนวันนี้ให้เฉพาะเวลาที่ยังไม่ถึง
+    if day_value > reference_time.date():
+        return TIME_SLOTS.copy()
+    if day_value < reference_time.date():
+        return []
+
+    available = []
+    for slot in TIME_SLOTS:
+        slot_time = datetime.strptime(slot, "%H:%M").time()
+        slot_datetime = datetime.combine(day_value, slot_time, tzinfo=BKK)
+        if slot_datetime > reference_time:
+            available.append(slot)
+    return available
+
+
+def appointment_is_in_future(day_value, time_value, reference_time=None):
+    """ตรวจซ้ำตอนบันทึก เพื่อป้องกันการเลือกค้างไว้จนเวลานัดผ่านไป"""
+    reference_time = reference_time or now_bkk()
+    try:
+        slot_time = datetime.strptime(str(time_value), "%H:%M").time()
+        appointment_datetime = datetime.combine(day_value, slot_time, tzinfo=BKK)
+        return appointment_datetime > reference_time
+    except (TypeError, ValueError):
+        return False
+
+
 def thai_date(day_value):
     if isinstance(day_value, datetime):
         day_value = day_value.date()
@@ -757,18 +789,27 @@ if page == "ผู้รับบริการ":
     max_day = today + timedelta(days=30)
 
     with booking_tab:
-        with st.form("patient_booking_form"):
-            st.subheader("ข้อมูลนัดหมาย")
-
-            appt_date = st.date_input(
-                "เลือกวันนัดหมาย",
-                min_value=today,
-                max_value=max_day,
-                value=today,
-                format="DD/MM/YYYY",
+        st.subheader("ข้อมูลนัดหมาย")
+        appt_date = st.date_input(
+            "เลือกวันนัดหมาย",
+            min_value=today,
+            max_value=max_day,
+            value=today,
+            format="DD/MM/YYYY",
+            key="booking_appointment_date",
+        )
+        booking_time_slots = available_time_slots(appt_date)
+        if booking_time_slots:
+            appt_time = st.selectbox(
+                "เลือกเวลา",
+                booking_time_slots,
+                key="booking_appointment_time",
             )
-            appt_time = st.selectbox("เลือกเวลา", TIME_SLOTS)
+        else:
+            appt_time = None
+            st.warning("วันนี้ไม่มีเวลานัดหมายที่ยังไม่ผ่าน กรุณาเลือกวันทำการถัดไป")
 
+        with st.form("patient_booking_form"):
             st.subheader("ส่วนที่ 1 ของผู้ขอรับใบรับรองสุขภาพ")
 
             citizen_id = st.text_input("เลขบัตรประชาชน 13 หลัก")
@@ -814,6 +855,10 @@ if page == "ผู้รับบริการ":
 
             if not is_workday(appt_date):
                 st.error("กรุณาเลือกเฉพาะวันทำการ จันทร์–ศุกร์")
+                st.stop()
+
+            if not appt_time or not appointment_is_in_future(appt_date, appt_time):
+                st.error("เวลานัดหมายนี้ผ่านไปแล้วตามเวลา Bangkok กรุณาเลือกเวลาใหม่")
                 st.stop()
 
             if not full_name.strip():
@@ -900,21 +945,28 @@ if page == "ผู้รับบริการ":
             "รหัสรายการ",
         )
 
+        new_appt_date = st.date_input(
+            "วันนัดหมายใหม่",
+            min_value=today,
+            max_value=max_day,
+            value=today,
+            format="DD/MM/YYYY",
+            key="edit_appointment_date",
+        )
+        edit_time_slots = available_time_slots(new_appt_date)
+        if edit_time_slots:
+            new_appt_time = st.selectbox(
+                "เวลานัดหมายใหม่",
+                edit_time_slots,
+                key="new_appointment_time",
+            )
+        else:
+            new_appt_time = None
+            st.warning("วันนี้ไม่มีเวลานัดหมายที่ยังไม่ผ่าน กรุณาเลือกวันทำการถัดไป")
+
         with st.form("edit_appointment_form"):
             edit_citizen_id = st.text_input("เลขบัตรประชาชน 13 หลัก")
             edit_email = st.text_input("อีเมลที่ใช้จอง")
-            new_appt_date = st.date_input(
-                "วันนัดหมายใหม่",
-                min_value=today,
-                max_value=max_day,
-                value=today,
-                format="DD/MM/YYYY",
-            )
-            new_appt_time = st.selectbox(
-                "เวลานัดหมายใหม่",
-                TIME_SLOTS,
-                key="new_appointment_time",
-            )
             edit_submitted = st.form_submit_button(
                 "ยืนยันการแก้ไขนัดหมาย",
                 type="primary",
@@ -949,6 +1001,12 @@ if page == "ผู้รับบริการ":
 
             if not is_workday(new_appt_date):
                 st.error("กรุณาเลือกเฉพาะวันทำการ จันทร์–ศุกร์")
+                st.stop()
+
+            if not new_appt_time or not appointment_is_in_future(
+                new_appt_date, new_appt_time
+            ):
+                st.error("เวลานัดหมายนี้ผ่านไปแล้วตามเวลา Bangkok กรุณาเลือกเวลาใหม่")
                 st.stop()
 
             if edits_used_today(df, cid) >= 2:
@@ -1677,6 +1735,7 @@ elif page == "พยาบาล/แพทย์":
                 st.rerun()
             except Exception as error:
                 st.error(f"บันทึกข้อมูลไม่สำเร็จ: {error}")
+
 
 
 
