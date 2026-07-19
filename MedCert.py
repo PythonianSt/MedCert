@@ -48,6 +48,34 @@ TIME_SLOTS = [
     "15:00", "15:30", "16:00", "16:30",
 ]
 
+# วันหยุดประจำปี 2569 ตามปฏิทินที่กำหนด
+# รวมวันลาพักผ่อนของแพทย์ 19–22 ตุลาคม 2569
+HOLIDAYS_2026 = {
+    date(2026, 1, 1): "วันขึ้นปีใหม่",
+    date(2026, 1, 2): "วันหยุดกรณีพิเศษ",
+    date(2026, 3, 3): "วันมาฆบูชา",
+    date(2026, 4, 6): "วันจักรี",
+    date(2026, 4, 13): "วันสงกรานต์",
+    date(2026, 4, 14): "วันสงกรานต์",
+    date(2026, 4, 15): "วันสงกรานต์",
+    date(2026, 5, 1): "วันแรงงานแห่งชาติ",
+    date(2026, 5, 4): "วันฉัตรมงคล",
+    date(2026, 6, 1): "วันหยุดชดเชยวันวิสาขบูชา",
+    date(2026, 6, 3): "วันเฉลิมพระชนมพรรษาสมเด็จพระนางเจ้าฯ พระบรมราชินี",
+    date(2026, 7, 28): "วันเฉลิมพระชนมพรรษาพระบาทสมเด็จพระเจ้าอยู่หัว",
+    date(2026, 7, 29): "วันอาสาฬหบูชา",
+    date(2026, 8, 12): "วันแม่แห่งชาติ",
+    date(2026, 10, 13): "วันนวมินทรมหาราช",
+    date(2026, 10, 19): "แพทย์ลาพักผ่อน",
+    date(2026, 10, 20): "แพทย์ลาพักผ่อน",
+    date(2026, 10, 21): "แพทย์ลาพักผ่อน",
+    date(2026, 10, 22): "แพทย์ลาพักผ่อน",
+    date(2026, 10, 23): "วันปิยมหาราช",
+    date(2026, 12, 7): "วันหยุดชดเชยวันคล้ายวันพระบรมราชสมภพ รัชกาลที่ 9",
+    date(2026, 12, 10): "วันรัฐธรรมนูญ",
+    date(2026, 12, 31): "วันสิ้นปี",
+}
+
 ACTIVE_STATUSES = {
     "booked", "registered", "lab_done", "doctor_approved", "printed"
 }
@@ -173,7 +201,38 @@ def valid_email(value):
 
 
 def is_workday(day_value):
-    return day_value.weekday() < 5
+    """True เมื่อเป็นวันจันทร์–ศุกร์และไม่ใช่วันหยุด/วันลาพักผ่อน"""
+    if isinstance(day_value, datetime):
+        day_value = day_value.date()
+    return day_value.weekday() < 5 and day_value not in HOLIDAYS_2026
+
+
+def holiday_name(day_value):
+    """คืนชื่อวันหยุด ถ้าเป็นวันหยุดที่กำหนดไว้"""
+    if isinstance(day_value, datetime):
+        day_value = day_value.date()
+    return HOLIDAYS_2026.get(day_value, "")
+
+
+def selectable_appointment_dates(start_day, end_day, reference_time=None):
+    """สร้างรายชื่อวันนัดที่เปิดจองจริงภายในช่วงวันที่กำหนด"""
+    reference_time = reference_time or now_bkk()
+    dates = []
+    current = start_day
+    while current <= end_day:
+        if is_workday(current):
+            # วันนี้ต้องมีเวลาเหลืออย่างน้อยหนึ่งช่วงจึงจะแสดงให้เลือก
+            if current != reference_time.date() or available_time_slots(current, reference_time):
+                dates.append(current)
+        current += timedelta(days=1)
+    return dates
+
+
+def appointment_date_label(day_value):
+    weekday_names = [
+        "จันทร์", "อังคาร", "พุธ", "พฤหัสบดี", "ศุกร์", "เสาร์", "อาทิตย์"
+    ]
+    return f"วัน{weekday_names[day_value.weekday()]}ที่ {day_value.strftime('%d/%m/%Y')}"
 
 
 def available_time_slots(day_value, reference_time=None):
@@ -181,6 +240,10 @@ def available_time_slots(day_value, reference_time=None):
     reference_time = reference_time or now_bkk()
     if isinstance(day_value, datetime):
         day_value = day_value.date()
+
+    # ไม่เปิดช่วงเวลาในวันเสาร์–อาทิตย์ วันนักขัตฤกษ์ หรือวันลาพักผ่อน
+    if not is_workday(day_value):
+        return []
 
     # วันอนาคตใช้ได้ทุกช่วงเวลา ส่วนวันนี้ให้เฉพาะเวลาที่ยังไม่ถึง
     if day_value > reference_time.date():
@@ -777,6 +840,7 @@ if page == "ผู้รับบริการ":
             <p>• ท่านสามารถแก้ไขวันหรือเวลานัดหมายได้ไม่เกินวันละ 2 ครั้ง</p>
             <p>• ระบบอนุญาตให้มีนัดหมายได้มากที่สุดสัปดาห์ละ 2 ครั้ง</p>
             <p>• เวลานัดหมายคือ 08.30–12.00 น. และ 15.00–16.30 น.</p>
+            <p>• ระบบเว้นวันเสาร์–อาทิตย์ วันนักขัตฤกษ์ และวันลาพักผ่อนของแพทย์</p>
             <p>• หลังบันทึก โปรดเก็บ QR code หรือรหัสรายการไว้ใช้ติดต่อและแก้ไขนัดหมาย</p>
         </div>
         """,
@@ -785,20 +849,25 @@ if page == "ผู้รับบริการ":
 
     booking_tab, edit_tab = st.tabs(["นัดหมายใหม่", "แก้ไขนัดหมาย"])
 
-    today = now_bkk().date()
+    current_bkk = now_bkk()
+    today = current_bkk.date()
     max_day = today + timedelta(days=30)
+    appointment_dates = selectable_appointment_dates(today, max_day, current_bkk)
 
     with booking_tab:
         st.subheader("ข้อมูลนัดหมาย")
-        appt_date = st.date_input(
+        if not appointment_dates:
+            st.error("ไม่พบวันทำการที่เปิดรับนัดหมายภายใน 30 วันข้างหน้า")
+            st.stop()
+
+        appt_date = st.selectbox(
             "เลือกวันนัดหมาย",
-            min_value=today,
-            max_value=max_day,
-            value=today,
-            format="DD/MM/YYYY",
+            appointment_dates,
+            format_func=appointment_date_label,
             key="booking_appointment_date",
+            help="ระบบไม่แสดงวันเสาร์–อาทิตย์ วันนักขัตฤกษ์ และวันที่แพทย์ลาพักผ่อน",
         )
-        booking_time_slots = available_time_slots(appt_date)
+        booking_time_slots = available_time_slots(appt_date, current_bkk)
         if booking_time_slots:
             appt_time = st.selectbox(
                 "เลือกเวลา",
@@ -854,7 +923,9 @@ if page == "ผู้รับบริการ":
                 st.stop()
 
             if not is_workday(appt_date):
-                st.error("กรุณาเลือกเฉพาะวันทำการ จันทร์–ศุกร์")
+                reason = holiday_name(appt_date)
+                message = f"วันที่เลือกเป็นวันหยุด: {reason}" if reason else "วันที่เลือกเป็นวันเสาร์หรือวันอาทิตย์"
+                st.error(message)
                 st.stop()
 
             if not appt_time or not appointment_is_in_future(appt_date, appt_time):
@@ -945,15 +1016,18 @@ if page == "ผู้รับบริการ":
             "รหัสรายการ",
         )
 
-        new_appt_date = st.date_input(
+        if not appointment_dates:
+            st.error("ไม่พบวันทำการที่เปิดรับนัดหมายภายใน 30 วันข้างหน้า")
+            st.stop()
+
+        new_appt_date = st.selectbox(
             "วันนัดหมายใหม่",
-            min_value=today,
-            max_value=max_day,
-            value=today,
-            format="DD/MM/YYYY",
+            appointment_dates,
+            format_func=appointment_date_label,
             key="edit_appointment_date",
+            help="ระบบไม่แสดงวันเสาร์–อาทิตย์ วันนักขัตฤกษ์ และวันที่แพทย์ลาพักผ่อน",
         )
-        edit_time_slots = available_time_slots(new_appt_date)
+        edit_time_slots = available_time_slots(new_appt_date, current_bkk)
         if edit_time_slots:
             new_appt_time = st.selectbox(
                 "เวลานัดหมายใหม่",
@@ -1000,7 +1074,9 @@ if page == "ผู้รับบริการ":
                 st.stop()
 
             if not is_workday(new_appt_date):
-                st.error("กรุณาเลือกเฉพาะวันทำการ จันทร์–ศุกร์")
+                reason = holiday_name(new_appt_date)
+                message = f"วันที่เลือกเป็นวันหยุด: {reason}" if reason else "วันที่เลือกเป็นวันเสาร์หรือวันอาทิตย์"
+                st.error(message)
                 st.stop()
 
             if not new_appt_time or not appointment_is_in_future(
@@ -1735,6 +1811,7 @@ elif page == "พยาบาล/แพทย์":
                 st.rerun()
             except Exception as error:
                 st.error(f"บันทึกข้อมูลไม่สำเร็จ: {error}")
+
 
 
 
