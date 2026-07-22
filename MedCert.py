@@ -653,7 +653,7 @@ def create_certificate_pdf(row):
 
     left = 32
     right = page_width - 32
-    y = page_height - 28
+    y = page_height - 58
     body_size = 12.76
     small_size = 11.22
     leading = 15.4
