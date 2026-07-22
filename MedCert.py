@@ -713,8 +713,9 @@ def create_certificate_pdf(row):
     )
     text_line(f"ลงชื่อ ........................................................ ผู้ขอรับใบรับรองสุขภาพ     วันที่ {issue_date}", align="right", size=small_size)
 
-    y -= leading  # เว้น 1 บรรทัดระหว่างส่วนที่ 1 และส่วนที่ 2
+    y -= leading  # เว้น 1 บรรทัดระหว่างส่วนที่ 1 และเส้นคั่น
     divider()
+    y -= leading  # เว้นเพิ่มอีก 1 บรรทัดระหว่างเส้นคั่นกับส่วนที่ 2
     text_line("ส่วนที่ 2  ของแพทย์", size=14.52)
     text_line(f"สถานที่ตรวจ สถานพยาบาลมหาวิทยาลัยเกษตรศาสตร์ วิทยาเขตกำแพงแสน   วันที่ {issue_date}")
     text_line(f"ข้าพเจ้า {row.get('doctor_name', '')}   ใบอนุญาตประกอบวิชาชีพเวชกรรมเลขที่ {row.get('doctor_license', '')}")
@@ -1813,6 +1814,7 @@ elif page == "พยาบาล/แพทย์":
                 st.rerun()
             except Exception as error:
                 st.error(f"บันทึกข้อมูลไม่สำเร็จ: {error}")
+
 
 
 
