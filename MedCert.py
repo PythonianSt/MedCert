@@ -552,9 +552,9 @@ def build_certificate_html(row):
         .certificate-page {{
             box-sizing: border-box; width: 100%; max-width: 192mm; margin: 0 auto;
             font-family: 'THSarabunEmbedded', 'TH Sarabun New', 'Sarabun', sans-serif;
-            font-size: 13.2pt; line-height: 1.08; color: #111; background: white;
+            font-size: 14.52pt; line-height: 1.08; color: #111; background: white;
         }}
-        .certificate-page h1 {{ margin: 0 0 2mm 0; text-align: center; font-size: 19pt; line-height: 1; }}
+        .certificate-page h1 {{ margin: 0 0 2mm 0; text-align: center; font-size: 20.9pt; line-height: 1; }}
         .certificate-page p {{ margin: 0.45mm 0; }}
         .certificate-page ol {{ margin: 0.5mm 0 0.5mm 7mm; padding-left: 5mm; }}
         .certificate-page li {{ margin: 0.15mm 0; }}
@@ -564,7 +564,7 @@ def build_certificate_html(row):
         .line-short {{ min-width:23mm; }} .line-long {{ min-width:82mm; }} .line-full {{ min-width:135mm; }}
         .section-divider {{ border-top: 1px solid #555; margin: 1.5mm 0 1mm 0; }}
         .signature-row {{ display:flex; justify-content:flex-end; gap:4mm; margin-top:1mm; }}
-        .small-note {{ font-size: 11.5pt; }}
+        .small-note {{ font-size: 12.65pt; }}
         @media screen {{ .certificate-page {{ box-shadow:0 0 10px rgba(0,0,0,.12); padding:7mm 9mm; min-height:297mm; }} }}
         @media print {{ .certificate-page {{ box-shadow:none; padding:0; }} }}
     </style>
@@ -585,6 +585,7 @@ def build_certificate_html(row):
       <p class="small-note">* ในกรณีโรคลมชัก ให้แนบประวัติการรักษาจากแพทย์ผู้รักษาว่าท่านปลอดจากอาการชักมากกว่า 1 ปี เพื่ออนุญาตให้ขับรถได้</p>
       <div class="signature-row"><span>ลงชื่อ <span class="line">&nbsp;</span> ผู้ขอรับใบรับรองสุขภาพ</span><span>วันที่ <span class="line line-short">{issue_date}</span></span></div>
 
+      <div style="height:1em;"></div>
       <div class="section-divider"></div>
       <p><span class="section-label">ส่วนที่ 2</span> <span class="bold">ของแพทย์</span></p>
       <p>สถานที่ตรวจ สถานพยาบาลมหาวิทยาลัยเกษตรศาสตร์ วิทยาเขตกำแพงแสน วันที่ <span class="line line-short">{issue_date}</span></p>
@@ -653,9 +654,9 @@ def create_certificate_pdf(row):
     left = 32
     right = page_width - 32
     y = page_height - 28
-    body_size = 11.6
-    small_size = 10.2
-    leading = 14.0
+    body_size = 12.76
+    small_size = 11.22
+    leading = 15.4
 
     def text_line(text, x=left, size=body_size, bold=False, align="left"):
         nonlocal y
@@ -692,10 +693,10 @@ def create_certificate_pdf(row):
     name_text = f"{row.get('prefix', '')}{row.get('full_name', '')}"
     cid_text = citizen_id_display(row.get("citizen_id", ""))
 
-    text_line("ใบรับรองแพทย์", size=16.5, align="center")
+    text_line("ใบรับรองแพทย์", size=18.15, align="center")
     y += 3
     text_line("เลขที่ ........................................", align="right", size=small_size)
-    text_line("ส่วนที่ 1  ของผู้ขอรับใบรับรองสุขภาพ", size=13.2)
+    text_line("ส่วนที่ 1  ของผู้ขอรับใบรับรองสุขภาพ", size=14.52)
     text_line(f"ข้าพเจ้า {name_text}    เลขบัตรประชาชน {cid_text}")
     wrapped(f"สถานที่อยู่ที่ติดต่อได้ {row.get('address', '')}", gap=0)
     text_line(f"อีเมล {row.get('email', '')}")
@@ -708,12 +709,13 @@ def create_certificate_pdf(row):
     wrapped(
         "* ในกรณีโรคลมชัก ให้แนบประวัติการรักษาจากแพทย์ผู้รักษาว่า"
         "ท่านปลอดจากอาการชักมากกว่า 1 ปี เพื่ออนุญาตให้ขับรถได้",
-        size=9.4,
+        size=10.34,
     )
     text_line(f"ลงชื่อ ........................................................ ผู้ขอรับใบรับรองสุขภาพ     วันที่ {issue_date}", align="right", size=small_size)
 
+    y -= leading  # เว้น 1 บรรทัดระหว่างส่วนที่ 1 และส่วนที่ 2
     divider()
-    text_line("ส่วนที่ 2  ของแพทย์", size=13.2)
+    text_line("ส่วนที่ 2  ของแพทย์", size=14.52)
     text_line(f"สถานที่ตรวจ สถานพยาบาลมหาวิทยาลัยเกษตรศาสตร์ วิทยาเขตกำแพงแสน   วันที่ {issue_date}")
     text_line(f"ข้าพเจ้า {row.get('doctor_name', '')}   ใบอนุญาตประกอบวิชาชีพเวชกรรมเลขที่ {row.get('doctor_license', '')}")
     wrapped("สถานพยาบาลมหาวิทยาลัยเกษตรศาสตร์ วิทยาเขตกำแพงแสน เลขที่ 1 หมู่ 6 ตำบลกำแพงแสน อำเภอกำแพงแสน จังหวัดนครปฐม 73140")
@@ -745,7 +747,7 @@ def create_certificate_pdf(row):
         align="right",
         size=small_size,
     )
-    text_line("หมายเหตุ: ประทับตราสถานพยาบาลหลังพิมพ์เอกสาร", size=9.8)
+    text_line("หมายเหตุ: ประทับตราสถานพยาบาลหลังพิมพ์เอกสาร", size=10.78)
 
     pdf.showPage()
     pdf.save()
@@ -1811,6 +1813,7 @@ elif page == "พยาบาล/แพทย์":
                 st.rerun()
             except Exception as error:
                 st.error(f"บันทึกข้อมูลไม่สำเร็จ: {error}")
+
 
 
 
