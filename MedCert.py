@@ -654,10 +654,10 @@ def create_certificate_pdf(row):
     left = 32
     right = page_width - 32
     y = page_height - 58
-    body_size = 12.76
-    small_size = 11.22
-    leading = 15.4
-
+    body_size = 13.40
+    small_size = 11.78
+    leading = 16.17
+    y = page_height - 58 - (2 * leading)
     def text_line(text, x=left, size=body_size, bold=False, align="left"):
         nonlocal y
         pdf.setFont(font_name, size)
@@ -693,10 +693,10 @@ def create_certificate_pdf(row):
     name_text = f"{row.get('prefix', '')}{row.get('full_name', '')}"
     cid_text = citizen_id_display(row.get("citizen_id", ""))
 
-    text_line("ใบรับรองแพทย์", size=18.15, align="center")
+    text_line("ใบรับรองแพทย์", size=19.05, align="center")
     y += 3
     text_line("เลขที่ ........................................", align="right", size=small_size)
-    text_line("ส่วนที่ 1  ของผู้ขอรับใบรับรองสุขภาพ", size=14.52)
+    text_line("ส่วนที่ 1  ของผู้ขอรับใบรับรองสุขภาพ", size=15.24)
     text_line(f"ข้าพเจ้า {name_text}    เลขบัตรประชาชน {cid_text}")
     wrapped(f"สถานที่อยู่ที่ติดต่อได้ {row.get('address', '')}", gap=0)
     text_line(f"อีเมล {row.get('email', '')}")
@@ -716,7 +716,7 @@ def create_certificate_pdf(row):
     y -= leading  # เว้น 1 บรรทัดระหว่างส่วนที่ 1 และเส้นคั่น
     divider()
     y -= leading  # เว้นเพิ่มอีก 1 บรรทัดระหว่างเส้นคั่นกับส่วนที่ 2
-    text_line("ส่วนที่ 2  ของแพทย์", size=14.52)
+    text_line("ส่วนที่ 2  ของแพทย์", size=15.24)
     text_line(f"สถานที่ตรวจ สถานพยาบาลมหาวิทยาลัยเกษตรศาสตร์ วิทยาเขตกำแพงแสน   วันที่ {issue_date}")
     text_line(f"ข้าพเจ้า {row.get('doctor_name', '')}   ใบอนุญาตประกอบวิชาชีพเวชกรรมเลขที่ {row.get('doctor_license', '')}")
     wrapped("สถานพยาบาลมหาวิทยาลัยเกษตรศาสตร์ วิทยาเขตกำแพงแสน เลขที่ 1 หมู่ 6 ตำบลกำแพงแสน อำเภอกำแพงแสน จังหวัดนครปฐม 73140")
