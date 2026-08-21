@@ -158,6 +158,11 @@ def ensure_columns(df):
     # เติมค่าเริ่มต้นให้ข้อมูลเดิม
     df.loc[df["confirmation_status"].eq(""), "confirmation_status"] = "รอการยืนยัน"
     df.loc[df["edit_count_today"].eq(""), "edit_count_today"] = "0"
+    # ประวัติสุขภาพ: ถ้ายังไม่มีการกรอก ให้ถือค่าเริ่มต้นเป็น “ไม่มี”
+    # เพื่อให้หน้าแสดงผลและใบรับรองแพทย์ติ๊กช่อง “ไม่มี” โดยอัตโนมัติ
+    for history_column in ["chronic", "accident", "hospital", "epilepsy", "other_history"]:
+        df.loc[df[history_column].eq(""), history_column] = "ไม่มี"
+
     # ผลตรวจ Methamphetamine บันทึกด้วยมือในเวชระเบียน จึงใช้ Negative เป็นค่าเริ่มต้นในระบบ
     df.loc[df["urine_meth_result"].eq(""), "urine_meth_result"] = "Negative"
     return df
@@ -986,15 +991,15 @@ if page == "ผู้รับบริการ":
                 "sex": sex,
                 "address": address.strip(),
                 "purpose": real_purpose,
-                "chronic": "",
+                "chronic": "ไม่มี",
                 "chronic_detail": "",
-                "accident": "",
+                "accident": "ไม่มี",
                 "accident_detail": "",
-                "hospital": "",
+                "hospital": "ไม่มี",
                 "hospital_detail": "",
-                "epilepsy": "",
+                "epilepsy": "ไม่มี",
                 "epilepsy_detail": "",
-                "other_history": "",
+                "other_history": "ไม่มี",
                 "other_history_detail": "",
                 "urine_meth_result": "Negative",
             }
@@ -1765,6 +1770,7 @@ elif page == "พยาบาล/แพทย์":
                 st.rerun()
             except Exception as error:
                 st.error(f"บันทึกข้อมูลไม่สำเร็จ: {error}")
+
 
 
 
