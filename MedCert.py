@@ -158,6 +158,8 @@ def ensure_columns(df):
     # เติมค่าเริ่มต้นให้ข้อมูลเดิม
     df.loc[df["confirmation_status"].eq(""), "confirmation_status"] = "รอการยืนยัน"
     df.loc[df["edit_count_today"].eq(""), "edit_count_today"] = "0"
+    # ผลตรวจ Methamphetamine บันทึกด้วยมือในเวชระเบียน จึงใช้ Negative เป็นค่าเริ่มต้นในระบบ
+    df.loc[df["urine_meth_result"].eq(""), "urine_meth_result"] = "Negative"
     return df
 
 
@@ -473,7 +475,7 @@ def enter_record_id(key_prefix, label="รหัสรายการ"):
 
     mode = st.radio(
         "วิธีระบุรหัสรายการ",
-        ["สแกน QR code", "กรอกเอง"],
+        ["กรอกเอง", "สแกน QR code"],
         horizontal=True,
         key=mode_key,
     )
@@ -828,7 +830,6 @@ page = st.sidebar.radio(
         "ผู้รับบริการ",
         "วัดสัญญาณชีพ",
         "เวชระเบียน",
-        "ลงผลตรวจปัสสาวะ",
         "พยาบาล/แพทย์",
     ],
 )
@@ -995,6 +996,7 @@ if page == "ผู้รับบริการ":
                 "epilepsy_detail": "",
                 "other_history": "",
                 "other_history_detail": "",
+                "urine_meth_result": "Negative",
             }
 
             try:
@@ -1009,6 +1011,7 @@ if page == "ผู้รับบริการ":
             st.subheader("QR code สำหรับนำมาติดต่อหน้างาน")
             st.image(make_qr(record_id), width=260)
             st.code(record_id)
+            st.info("โปรดบันทึกภาพ QR code พร้อมรหัส เพื่อแสดงตนต่อสถานพยาบาล")
             st.write(
                 f"วันนัดหมาย: {appt_date.strftime('%d/%m/%Y')} เวลา {appt_time} น."
             )
@@ -1534,60 +1537,7 @@ elif page == "เวชระเบียน":
 
 
 # =====================================================
-# 4. ลงผลตรวจปัสสาวะ
-# =====================================================
-elif page == "ลงผลตรวจปัสสาวะ":
-    password_gate(PASS_LAB, "password_lab")
-    st.title("ลงผลตรวจปัสสาวะ Methamphetamine")
-
-    record_id = enter_record_id("lab", "กรอกรหัสรายการจากใต้ QR code")
-    if not record_id:
-        st.stop()
-
-    idx = find_by_record(df, record_id)
-    if idx is None:
-        st.error("ไม่พบข้อมูล")
-        st.stop()
-
-    row = df.loc[idx]
-    st.write(
-        {
-            "ชื่อ": f"{row.get('prefix', '')}{row.get('full_name', '')}",
-            "เลขบัตรประชาชน": citizen_id_display(row.get("citizen_id", "")),
-            "วันนัด": display_date(row.get("appointment_date", "")),
-            "เวลา": row.get("appointment_time", ""),
-        }
-    )
-
-    result_options = ["Negative", "Positive", "Invalid / ต้องตรวจซ้ำ"]
-    current_result = row.get("urine_meth_result", "")
-    result_index = result_options.index(current_result) if current_result in result_options else 0
-
-    urine_result = st.radio(
-        "ผลตรวจ Methamphetamine",
-        result_options,
-        index=result_index,
-        horizontal=True,
-    )
-    urine_note = st.text_area("หมายเหตุผลตรวจ", value=row.get("urine_note", ""))
-
-    if st.button("บันทึกผลตรวจ", type="primary"):
-        timestamp = now_bkk().isoformat()
-        df.loc[idx, "urine_meth_result"] = urine_result
-        df.loc[idx, "urine_note"] = urine_note.strip()
-        df.loc[idx, "urine_checked_at_bkk"] = timestamp
-        df.loc[idx, "last_modified_at_bkk"] = timestamp
-        df.loc[idx, "status"] = "lab_done"
-
-        try:
-            save_csv(df, sha)
-            st.success("บันทึกผลตรวจแล้ว")
-        except Exception as error:
-            st.error(f"บันทึกข้อมูลไม่สำเร็จ: {error}")
-
-
-# =====================================================
-# 5. พยาบาล/แพทย์
+# 4. พยาบาล/แพทย์
 # =====================================================
 elif page == "พยาบาล/แพทย์":
     password_gate(PASS_DOC, "password_doctor")
@@ -1608,12 +1558,9 @@ elif page == "พยาบาล/แพทย์":
             "ชื่อ": f"{row.get('prefix', '')}{row.get('full_name', '')}",
             "เลขบัตรประชาชน": citizen_id_display(row.get("citizen_id", "")),
             "วัตถุประสงค์": row.get("purpose", ""),
-            "ผล Methamphetamine": row.get("urine_meth_result", "") or "ยังไม่มีผล",
+            "ผล Methamphetamine": row.get("urine_meth_result", "") or "Negative",
         }
     )
-
-    if not row.get("urine_meth_result", ""):
-        st.warning("ยังไม่มีผลตรวจปัสสาวะ Methamphetamine")
 
     st.subheader("ส่วนที่ 1 ของผู้ขอรับใบรับรองสุขภาพ")
     st.write({
