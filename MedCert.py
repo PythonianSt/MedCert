@@ -1,0 +1,1781 @@
+import base64
+import html
+import re
+import uuid
+from datetime import date, datetime, timedelta
+from io import BytesIO, StringIO
+from pathlib import Path
+from urllib.parse import quote
+from zoneinfo import ZoneInfo
+
+import pandas as pd
+import requests
+import streamlit as st
+import cv2
+import numpy as np
+
+
+
+# =====================================================
+# App configuration
+# =====================================================
+st.set_page_config(
+    page_title="ใบรับรองแพทย์ KU KPS",
+    page_icon="🩺",
+    layout="wide",
+)
+
+BKK = ZoneInfo("Asia/Bangkok")
+
+GITHUB_TOKEN = st.secrets["GITHUB_TOKEN"]
+GITHUB_REPO = st.secrets["GITHUB_REPO"]
+GITHUB_BRANCH = st.secrets.get("GITHUB_BRANCH", "main")
+CSV_PATH = st.secrets.get("CSV_PATH", "medical_certificate.csv")
+
+PASS_REG = st.secrets.get("PASS_REG", "q01")
+PASS_LAB = st.secrets.get("PASS_LAB", "q02")
+PASS_DOC = st.secrets.get("PASS_DOC", "q03")
+
+
+DOCTORS = {
+    "นายแพทย์กำธร ตันติวิทยาทันต์": "12082",
+    "นายแพทย์สมชาย เจนลาภวัฒนกุล": "15771",
+}
+
+# เวลานัดหมายใหม่: 08.30–12.00 และ 15.00–16.30 น.
+TIME_SLOTS = [
+    "08:30", "08:40", "08:50",
+    "09:00", "09:10", "09:20", "09:30", "09:40", "09:50",
+    "10:00", "10:10", "10:20", "10:30", "10:40", "10:50",
+    "11:00",
+    "15:00", "15:10", "15:20", "15:30", "15:40", "15:50",
+    "16:00", "16:10", "16:20", "16:30",
+]
+
+# วันหยุดประจำปี 2569 ตามปฏิทินที่กำหนด
+# รวมวันลาพักผ่อนของแพทย์ 19–22 ตุลาคม 2569
+HOLIDAYS_2026 = {
+    date(2026, 1, 1): "วันขึ้นปีใหม่",
+    date(2026, 1, 2): "วันหยุดกรณีพิเศษ",
+    date(2026, 3, 3): "วันมาฆบูชา",
+    date(2026, 4, 6): "วันจักรี",
+    date(2026, 4, 13): "วันสงกรานต์",
+    date(2026, 4, 14): "วันสงกรานต์",
+    date(2026, 4, 15): "วันสงกรานต์",
+    date(2026, 5, 1): "วันแรงงานแห่งชาติ",
+    date(2026, 5, 4): "วันฉัตรมงคล",
+    date(2026, 6, 1): "วันหยุดชดเชยวันวิสาขบูชา",
+    date(2026, 6, 3): "วันเฉลิมพระชนมพรรษาสมเด็จพระนางเจ้าฯ พระบรมราชินี",
+    date(2026, 7, 28): "วันเฉลิมพระชนมพรรษาพระบาทสมเด็จพระเจ้าอยู่หัว",
+    date(2026, 7, 29): "วันอาสาฬหบูชา",
+    date(2026, 8, 12): "วันแม่แห่งชาติ",
+    date(2026, 10, 13): "วันนวมินทรมหาราช",
+    date(2026, 10, 19): "แพทย์ลาพักผ่อน",
+    date(2026, 10, 20): "แพทย์ลาพักผ่อน",
+    date(2026, 10, 21): "แพทย์ลาพักผ่อน",
+    date(2026, 10, 22): "แพทย์ลาพักผ่อน",
+    date(2026, 10, 23): "วันปิยมหาราช",
+    date(2026, 12, 7): "วันหยุดชดเชยวันคล้ายวันพระบรมราชสมภพ รัชกาลที่ 9",
+    date(2026, 12, 10): "วันรัฐธรรมนูญ",
+    date(2026, 12, 31): "วันสิ้นปี",
+}
+
+ACTIVE_STATUSES = {
+    "booked", "registered", "lab_done", "doctor_approved", "printed"
+}
+
+STATUS_LABELS = {
+    "booked": "นัดหมายแล้ว",
+    "registered": "เวชระเบียนยืนยันแล้ว",
+    "lab_done": "ลงผลตรวจปัสสาวะแล้ว",
+    "doctor_approved": "แพทย์อนุมัติแล้ว",
+    "printed": "พิมพ์ใบรับรองแล้ว",
+    "cancelled": "ยกเลิก",
+}
+
+CONFIRMATION_OPTIONS = [
+    "รอการยืนยัน",
+    "ส่งอีเมลแล้ว",
+    "ผู้รับบริการยืนยันแล้ว",
+    "ติดต่อไม่ได้",
+    "ยกเลิกนัด",
+]
+
+
+# =====================================================
+# GitHub CSV storage
+# =====================================================
+def github_headers():
+    return {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+def read_csv():
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{CSV_PATH}"
+    response = requests.get(
+        url,
+        headers=github_headers(),
+        params={"ref": GITHUB_BRANCH},
+        timeout=30,
+    )
+
+    if response.status_code == 404:
+        return pd.DataFrame(), None
+
+    response.raise_for_status()
+    payload = response.json()
+    content = base64.b64decode(payload["content"]).decode("utf-8-sig")
+    return pd.read_csv(StringIO(content), dtype=str).fillna(""), payload["sha"]
+
+
+def ensure_columns(df):
+    columns = [
+        "record_id", "created_at_bkk", "last_modified_at_bkk", "status",
+        "appointment_date", "appointment_time",
+        "email", "confirmation_status", "confirmation_note", "confirmation_at_bkk",
+        "edit_count_date", "edit_count_today", "last_appointment_edit_at_bkk",
+        "citizen_id", "prefix", "full_name", "sex", "address", "purpose",
+        "chronic", "chronic_detail", "accident", "accident_detail",
+        "hospital", "hospital_detail", "epilepsy", "epilepsy_detail",
+        "other_history", "other_history_detail",
+        "hn", "registration_note", "registered_at_bkk",
+        "urine_meth_result", "urine_note", "urine_checked_at_bkk",
+        "vital_bp", "vital_pulse", "vital_weight", "vital_height",
+        "vital_ai_raw", "vital_checked_at_bkk",
+        "doctor_name", "doctor_license", "weight", "height", "bp", "pulse",
+        "general_status", "abnormal_detail", "other_exam",
+        "doctor_opinion", "doctor_approved_at_bkk",
+        "printed_at_bkk",
+    ]
+
+    for column in columns:
+        if column not in df.columns:
+            df[column] = ""
+
+    # เติมค่าเริ่มต้นให้ข้อมูลเดิม
+    df.loc[df["confirmation_status"].eq(""), "confirmation_status"] = "รอการยืนยัน"
+    df.loc[df["edit_count_today"].eq(""), "edit_count_today"] = "0"
+    # ประวัติสุขภาพ: ถ้ายังไม่มีการกรอก ให้ถือค่าเริ่มต้นเป็น “ไม่มี”
+    # เพื่อให้หน้าแสดงผลและใบรับรองแพทย์ติ๊กช่อง “ไม่มี” โดยอัตโนมัติ
+    for history_column in ["chronic", "accident", "hospital", "epilepsy", "other_history"]:
+        df.loc[df[history_column].eq(""), history_column] = "ไม่มี"
+
+    # ผลตรวจ Methamphetamine บันทึกด้วยมือในเวชระเบียน จึงใช้ Negative เป็นค่าเริ่มต้นในระบบ
+    df.loc[df["urine_meth_result"].eq(""), "urine_meth_result"] = "Negative"
+    return df
+
+
+def save_csv(df, sha=None):
+    csv_text = df.to_csv(index=False, encoding="utf-8-sig")
+    encoded = base64.b64encode(csv_text.encode("utf-8-sig")).decode("utf-8")
+
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{CSV_PATH}"
+    payload = {
+        "message": f"update medical certificate {now_bkk().isoformat()}",
+        "content": encoded,
+        "branch": GITHUB_BRANCH,
+    }
+    if sha:
+        payload["sha"] = sha
+
+    response = requests.put(
+        url,
+        headers=github_headers(),
+        json=payload,
+        timeout=30,
+    )
+    response.raise_for_status()
+
+
+# =====================================================
+# Helpers
+# =====================================================
+def now_bkk():
+    return datetime.now(BKK)
+
+
+def clean_id(value):
+    return "".join(character for character in str(value) if character.isdigit())
+
+
+def normalize_email(value):
+    return str(value).strip().lower()
+
+
+def valid_email(value):
+    email_value = normalize_email(value)
+    pattern = r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$"
+    return bool(re.fullmatch(pattern, email_value))
+
+
+def is_workday(day_value):
+    """True เมื่อเป็นวันจันทร์–ศุกร์และไม่ใช่วันหยุด/วันลาพักผ่อน"""
+    if isinstance(day_value, datetime):
+        day_value = day_value.date()
+    return day_value.weekday() < 5 and day_value not in HOLIDAYS_2026
+
+
+def holiday_name(day_value):
+    """คืนชื่อวันหยุด ถ้าเป็นวันหยุดที่กำหนดไว้"""
+    if isinstance(day_value, datetime):
+        day_value = day_value.date()
+    return HOLIDAYS_2026.get(day_value, "")
+
+
+def selectable_appointment_dates(start_day, end_day, reference_time=None):
+    """สร้างรายชื่อวันนัดที่เปิดจองจริงภายในช่วงวันที่กำหนด"""
+    reference_time = reference_time or now_bkk()
+    dates = []
+    current = start_day
+    while current <= end_day:
+        if is_workday(current):
+            # วันนี้ต้องมีเวลาเหลืออย่างน้อยหนึ่งช่วงจึงจะแสดงให้เลือก
+            if current != reference_time.date() or available_time_slots(current, reference_time):
+                dates.append(current)
+        current += timedelta(days=1)
+    return dates
+
+
+def appointment_date_label(day_value):
+    weekday_names = [
+        "จันทร์", "อังคาร", "พุธ", "พฤหัสบดี", "ศุกร์", "เสาร์", "อาทิตย์"
+    ]
+    return f"วัน{weekday_names[day_value.weekday()]}ที่ {day_value.strftime('%d/%m/%Y')}"
+
+
+def available_time_slots(day_value, reference_time=None):
+    """คืนช่วงเวลาที่ยังจองได้ โดยอ้างอิงเวลา Asia/Bangkok"""
+    reference_time = reference_time or now_bkk()
+    if isinstance(day_value, datetime):
+        day_value = day_value.date()
+
+    # ไม่เปิดช่วงเวลาในวันเสาร์–อาทิตย์ วันนักขัตฤกษ์ หรือวันลาพักผ่อน
+    if not is_workday(day_value):
+        return []
+
+    # วันอนาคตใช้ได้ทุกช่วงเวลา ส่วนวันนี้ให้เฉพาะเวลาที่ยังไม่ถึง
+    if day_value > reference_time.date():
+        return TIME_SLOTS.copy()
+    if day_value < reference_time.date():
+        return []
+
+    available = []
+    for slot in TIME_SLOTS:
+        slot_time = datetime.strptime(slot, "%H:%M").time()
+        slot_datetime = datetime.combine(day_value, slot_time, tzinfo=BKK)
+        if slot_datetime > reference_time:
+            available.append(slot)
+    return available
+
+
+def appointment_is_in_future(day_value, time_value, reference_time=None):
+    """ตรวจซ้ำตอนบันทึก เพื่อป้องกันการเลือกค้างไว้จนเวลานัดผ่านไป"""
+    reference_time = reference_time or now_bkk()
+    try:
+        slot_time = datetime.strptime(str(time_value), "%H:%M").time()
+        appointment_datetime = datetime.combine(day_value, slot_time, tzinfo=BKK)
+        return appointment_datetime > reference_time
+    except (TypeError, ValueError):
+        return False
+
+
+def thai_date(day_value):
+    if isinstance(day_value, datetime):
+        day_value = day_value.date()
+
+    months = [
+        "", "มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน",
+        "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม",
+    ]
+    return f"{day_value.day} {months[day_value.month]} {day_value.year + 543}"
+
+
+def display_date(value):
+    try:
+        return datetime.strptime(str(value), "%Y-%m-%d").strftime("%d/%m/%Y")
+    except Exception:
+        return str(value)
+
+
+def parse_iso_datetime(value):
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=BKK)
+        return parsed.astimezone(BKK)
+    except Exception:
+        return None
+
+
+def get_issue_date(row):
+    """
+    วันที่ออกใบรับรองจาก Timestamp เขตเวลา Bangkok
+    เรียงลำดับจากเวลาที่แพทย์อนุมัติ แล้วจึงใช้ timestamp อื่นเป็นข้อมูลสำรอง
+    """
+    for column in [
+        "doctor_approved_at_bkk",
+        "printed_at_bkk",
+        "vital_checked_at_bkk",
+        "registered_at_bkk",
+        "created_at_bkk",
+    ]:
+        parsed = parse_iso_datetime(row.get(column, ""))
+        if parsed:
+            return parsed.date()
+    return now_bkk().date()
+
+
+def start_of_week(day_value):
+    return day_value - timedelta(days=day_value.weekday())
+
+
+def weekly_booking_count(df, citizen_id, target_date, exclude_record_id=None):
+    if df.empty:
+        return 0
+
+    week_start = start_of_week(target_date)
+    week_end = week_start + timedelta(days=6)
+
+    working = df.copy()
+    working["_appt_date"] = pd.to_datetime(
+        working["appointment_date"], errors="coerce"
+    ).dt.date
+
+    mask = (
+        working["citizen_id"].astype(str).eq(str(citizen_id))
+        & working["status"].astype(str).isin(ACTIVE_STATUSES)
+        & working["_appt_date"].apply(
+            lambda item: bool(item and week_start <= item <= week_end)
+        )
+    )
+
+    if exclude_record_id:
+        mask &= ~working["record_id"].astype(str).eq(str(exclude_record_id))
+
+    return int(mask.sum())
+
+
+def edits_used_today(df, citizen_id):
+    if df.empty:
+        return 0
+
+    today_text = now_bkk().date().isoformat()
+    same_person = df[df["citizen_id"].astype(str).eq(str(citizen_id))]
+    same_day = same_person[same_person["edit_count_date"].astype(str).eq(today_text)]
+
+    total = 0
+    for value in same_day["edit_count_today"].tolist():
+        try:
+            total += int(float(value))
+        except Exception:
+            pass
+    return total
+
+
+def make_qr(record_id):
+    # Lazy import: โหลด qrcode/Pillow เฉพาะเมื่อสร้าง QR หลังจองสำเร็จ
+    import qrcode
+    image = qrcode.make(record_id)
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def find_by_record(df, record_id):
+    if df.empty or "record_id" not in df.columns:
+        return None
+
+    matches = df[df["record_id"].astype(str).str.upper() == str(record_id).strip().upper()]
+    if matches.empty:
+        return None
+    return matches.index[0]
+
+
+def password_gate(correct_password, key):
+    password = st.sidebar.text_input("รหัสผ่าน", type="password", key=key)
+    if password != correct_password:
+        st.warning("กรุณาใส่รหัสผ่านให้ถูกต้อง")
+        st.stop()
+
+
+
+def valid_bp(value):
+    text = str(value).strip()
+    match = re.fullmatch(r"(\d{2,3})\s*/\s*(\d{2,3})", text)
+    if not match:
+        return False
+    systolic, diastolic = map(int, match.groups())
+    return 50 <= systolic <= 300 and 30 <= diastolic <= 200
+
+
+def split_bp(value):
+    """คืนค่า systolic/diastolic จากข้อความ BP เดิม เพื่อใช้เติมค่าเริ่มต้นในช่องแยก"""
+    text = str(value or "").strip()
+    match = re.fullmatch(r"(\d{2,3})\s*/\s*(\d{2,3})", text)
+    if not match:
+        return "", ""
+    return match.group(1), match.group(2)
+
+
+def valid_positive_number(value, minimum, maximum):
+    try:
+        number = float(str(value).strip())
+        return minimum <= number <= maximum
+    except Exception:
+        return False
+
+
+def read_qr_from_image(uploaded_img):
+    """อ่าน QR code จากภาพที่ถ่ายด้วย st.camera_input โดยใช้ OpenCV QRCodeDetector"""
+    if uploaded_img is None:
+        return ""
+
+    file_bytes = np.asarray(
+        bytearray(uploaded_img.getvalue()),
+        dtype=np.uint8,
+    )
+    image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+    if image is None:
+        return ""
+
+    detector = cv2.QRCodeDetector()
+    data, _, _ = detector.detectAndDecode(image)
+    return str(data).strip().upper() if data else ""
+
+
+def render_qr_scanner(key_prefix):
+    """แสดงกล้องถ่าย QR และเติมค่าที่อ่านได้ลง session state ของช่องรหัส"""
+    state_key = f"{key_prefix}_scanned_record_id"
+    widget_key = f"{key_prefix}_record_id"
+    camera_key = f"{key_prefix}_qr_camera"
+
+    qr_image = st.camera_input(
+        "ถ่ายภาพ QR code ให้ชัดและอยู่กลางภาพ",
+        key=camera_key,
+    )
+
+    if qr_image:
+        qr_value = read_qr_from_image(qr_image)
+        if qr_value:
+            st.session_state[state_key] = qr_value
+            st.session_state[widget_key] = qr_value
+            st.success(f"อ่าน QR สำเร็จ: {qr_value}")
+        else:
+            st.error(
+                "ยังอ่าน QR code ไม่ได้ กรุณาถ่ายใหม่ให้ QR ชัด "
+                "มีแสงเพียงพอ และอยู่กลางภาพ"
+            )
+
+
+def enter_record_id(key_prefix, label="รหัสรายการ"):
+    """เลือกถ่าย QR หรือกรอกเอง โดยผลสแกนจะเติมลงช่องรหัสทันที"""
+    mode_key = f"{key_prefix}_input_mode"
+    widget_key = f"{key_prefix}_record_id"
+    state_key = f"{key_prefix}_scanned_record_id"
+
+    mode = st.radio(
+        "วิธีระบุรหัสรายการ",
+        ["กรอกเอง", "สแกน QR code"],
+        horizontal=True,
+        key=mode_key,
+    )
+
+    if mode == "สแกน QR code":
+        render_qr_scanner(key_prefix)
+        scanned = st.session_state.get(state_key, "")
+        if scanned:
+            st.session_state[widget_key] = scanned
+    else:
+        # เมื่อเลือกกรอกเอง ผู้ใช้สามารถแก้ไขหรือแทนค่าที่เคยสแกนได้อย่างอิสระ
+        if (
+            st.session_state.get(state_key)
+            and st.session_state.get(widget_key)
+            == st.session_state.get(state_key)
+        ):
+            st.session_state[widget_key] = ""
+
+    value = st.text_input(
+        label,
+        placeholder="เช่น A1B2C3D4",
+        key=widget_key,
+        help="เมื่ออ่าน QR สำเร็จ ระบบจะเติมรหัสลงช่องนี้โดยอัตโนมัติ",
+    ).strip().upper()
+
+    return value
+
+def safe_int(value, default=0):
+    try:
+        return int(float(value))
+    except Exception:
+        return default
+
+
+def h(value):
+    return html.escape(str(value or ""), quote=True)
+
+
+def checked(value, target):
+    return "☑" if str(value) == target else "☐"
+
+
+def citizen_id_display(citizen_id):
+    cid = clean_id(citizen_id)
+    if len(cid) == 13:
+        return f"{cid[0]}-{cid[1:5]}-{cid[5:10]}-{cid[10:12]}-{cid[12]}"
+    return h(citizen_id)
+
+
+def embedded_font_css():
+    candidates = [
+        Path("THSarabunNew.ttf"),
+        Path(__file__).resolve().parent / "THSarabunNew.ttf",
+    ]
+
+    for font_path in candidates:
+        if font_path.exists():
+            encoded = base64.b64encode(font_path.read_bytes()).decode("ascii")
+            return f"""
+            @font-face {{
+                font-family: 'THSarabunEmbedded';
+                src: url(data:font/ttf;base64,{encoded}) format('truetype');
+                font-weight: normal;
+                font-style: normal;
+            }}
+            """
+    return ""
+
+
+def build_certificate_html(row):
+    issue_date = thai_date(get_issue_date(row))
+    name_text = f"{row.get('prefix', '')}{row.get('full_name', '')}"
+    cid_text = citizen_id_display(row.get("citizen_id", ""))
+    font_css = embedded_font_css()
+
+    return f"""
+    <style>
+        {font_css}
+        @page {{ size: A4; margin: 7mm 9mm; }}
+        .certificate-page {{
+            box-sizing: border-box; width: 100%; max-width: 192mm; margin: 0 auto;
+            font-family: 'THSarabunEmbedded', 'TH Sarabun New', 'Sarabun', sans-serif;
+            font-size: 14.52pt; line-height: 1.08; color: #111; background: white;
+        }}
+        .certificate-page h1 {{ margin: 0 0 2mm 0; text-align: center; font-size: 20.9pt; line-height: 1; }}
+        .certificate-page p {{ margin: 0.45mm 0; }}
+        .certificate-page ol {{ margin: 0.5mm 0 0.5mm 7mm; padding-left: 5mm; }}
+        .certificate-page li {{ margin: 0.15mm 0; }}
+        .right {{ text-align: right; }} .center {{ text-align: center; }} .bold {{ font-weight: 700; }}
+        .section-label {{ display:inline-block; border:1px solid #222; border-radius:1.5mm; padding:0.2mm 2mm; font-weight:700; }}
+        .line {{ display:inline-block; min-width:38mm; padding:0 1mm; border-bottom:1px dotted #333; vertical-align:baseline; }}
+        .line-short {{ min-width:23mm; }} .line-long {{ min-width:82mm; }} .line-full {{ min-width:135mm; }}
+        .section-divider {{ border-top: 1px solid #555; margin: 1.5mm 0 1mm 0; }}
+        .signature-row {{ display:flex; justify-content:flex-end; gap:4mm; margin-top:1mm; }}
+        .small-note {{ font-size: 12.65pt; }}
+        @media screen {{ .certificate-page {{ box-shadow:0 0 10px rgba(0,0,0,.12); padding:7mm 9mm; min-height:297mm; }} }}
+        @media print {{ .certificate-page {{ box-shadow:none; padding:0; }} }}
+    </style>
+
+    <div class="certificate-page">
+      <h1>ใบรับรองแพทย์</h1>
+      <p class="right">เลขที่ <span class="line line-short">&nbsp;</span></p>
+      <p><span class="section-label">ส่วนที่ 1</span> <span class="bold">ของผู้ขอรับใบรับรองสุขภาพ</span></p>
+      <p>ข้าพเจ้า <span class="line line-long">{h(name_text)}</span> เลขบัตรประชาชน <span class="line">{cid_text}</span></p>
+      <p>สถานที่อยู่ที่ติดต่อได้ <span class="line line-full">{h(row.get('address', ''))}</span></p>
+      <p>อีเมล <span class="line line-long">{h(row.get('email', ''))}</span></p>
+      <p>ข้าพเจ้าขอใบรับรองสุขภาพ โดยมีประวัติสุขภาพดังนี้</p>
+      <p>1. โรคประจำตัว {checked(row.get('chronic'), 'ไม่มี')} ไม่มี {checked(row.get('chronic'), 'มี')} มี ระบุ <span class="line">{h(row.get('chronic_detail', ''))}</span></p>
+      <p>2. อุบัติเหตุและผ่าตัด {checked(row.get('accident'), 'ไม่มี')} ไม่มี {checked(row.get('accident'), 'มี')} มี ระบุ <span class="line">{h(row.get('accident_detail', ''))}</span></p>
+      <p>3. เคยรักษาในโรงพยาบาล {checked(row.get('hospital'), 'ไม่มี')} ไม่มี {checked(row.get('hospital'), 'มี')} มี ระบุ <span class="line">{h(row.get('hospital_detail', ''))}</span></p>
+      <p>4. โรคลมชัก * {checked(row.get('epilepsy'), 'ไม่มี')} ไม่มี {checked(row.get('epilepsy'), 'มี')} มี ระบุ <span class="line">{h(row.get('epilepsy_detail', ''))}</span></p>
+      <p>5. ประวัติอื่นที่สำคัญ {checked(row.get('other_history'), 'ไม่มี')} ไม่มี {checked(row.get('other_history'), 'มี')} มี ระบุ <span class="line">{h(row.get('other_history_detail', ''))}</span></p>
+      <p class="small-note">* ในกรณีโรคลมชัก ให้แนบประวัติการรักษาจากแพทย์ผู้รักษาว่าท่านปลอดจากอาการชักมากกว่า 1 ปี เพื่ออนุญาตให้ขับรถได้</p>
+      <div class="signature-row"><span>ลงชื่อ <span class="line">&nbsp;</span> ผู้ขอรับใบรับรองสุขภาพ</span><span>วันที่ <span class="line line-short">{issue_date}</span></span></div>
+
+      <div style="height:1em;"></div>
+      <div class="section-divider"></div>
+      <p><span class="section-label">ส่วนที่ 2</span> <span class="bold">ของแพทย์</span></p>
+      <p>สถานที่ตรวจ สถานพยาบาลมหาวิทยาลัยเกษตรศาสตร์ วิทยาเขตกำแพงแสน วันที่ <span class="line line-short">{issue_date}</span></p>
+      <p>ข้าพเจ้า <span class="line">{h(row.get('doctor_name', ''))}</span> ใบอนุญาตประกอบวิชาชีพเวชกรรมเลขที่ <span class="line line-short">{h(row.get('doctor_license', ''))}</span></p>
+      <p>สถานพยาบาลมหาวิทยาลัยเกษตรศาสตร์ วิทยาเขตกำแพงแสน เลขที่ 1 หมู่ 6 ต.กำแพงแสน อ.กำแพงแสน จ.นครปฐม 73140</p>
+      <p>ได้ตรวจร่างกาย <span class="line">{h(name_text)}</span> เมื่อวันที่ <span class="line line-short">{issue_date}</span></p>
+      <p>น้ำหนัก <span class="line line-short">{h(row.get('weight', ''))}</span> กก. ความสูง <span class="line line-short">{h(row.get('height', ''))}</span> ซม. ความดันโลหิต <span class="line line-short">{h(row.get('bp', ''))}</span> มม.ปรอท ชีพจร <span class="line line-short">{h(row.get('pulse', ''))}</span> ครั้ง/นาที</p>
+      <p>สุขภาพทั่วไป {checked(row.get('general_status'), 'ปกติ')} ปกติ {checked(row.get('general_status'), 'ผิดปกติ')} ผิดปกติ ระบุ <span class="line">{h(row.get('abnormal_detail', ''))}</span></p>
+      <p>ขอรับรองว่าบุคคลดังกล่าวไม่เป็นผู้มีร่างกายทุพพลภาพจนไม่สามารถปฏิบัติหน้าที่ได้ ไม่ปรากฏอาการของโรคจิตหรือจิตฟั่นเฟือนหรือปัญญาอ่อน ไม่ปรากฏอาการติดยาเสพติดให้โทษหรือโรคพิษสุราเรื้อรัง และไม่ปรากฏอาการของโรคต่อไปนี้</p>
+      <ol><li>โรคเรื้อนในระยะติดต่อ หรือระยะที่ปรากฏอาการเป็นที่รังเกียจแก่สังคม</li><li>วัณโรคในระยะอันตราย</li><li>โรคเท้าช้างในระยะที่ปรากฏอาการเป็นที่รังเกียจแก่สังคม</li><li>อื่น ๆ ถ้ามี <span class="line line-long">{h(row.get('other_exam', ''))}</span></li></ol>
+      <p>สรุปความคิดเห็นและข้อแนะนำของแพทย์ <span class="line line-full">{h(row.get('doctor_opinion', ''))}</span></p>
+      <div class="signature-row"><span>ลงชื่อ <span class="line">&nbsp;</span> แพทย์ผู้ตรวจ ({h(row.get('doctor_name', ''))})</span></div>
+      <p class="small-note">หมายเหตุ: ประทับตราสถานพยาบาลหลังพิมพ์เอกสาร</p>
+    </div>
+    """
+
+
+def _reportlab_font_name(pdfmetrics, TTFont):
+    """Register the Thai font bundled with the repository (lazy ReportLab import)."""
+    candidates = [
+        Path("THSarabunNew.ttf"),
+        Path(__file__).resolve().parent / "THSarabunNew.ttf",
+    ]
+    for font_path in candidates:
+        if font_path.exists():
+            font_name = "THSarabunNew"
+            if font_name not in pdfmetrics.getRegisteredFontNames():
+                pdfmetrics.registerFont(TTFont(font_name, str(font_path)))
+            return font_name
+    raise FileNotFoundError(
+        "ไม่พบไฟล์ THSarabunNew.ttf กรุณาวางไฟล์นี้ไว้ใน repository เดียวกับ MedCert.py"
+    )
+
+
+def _wrap_text(text, font_name, font_size, max_width, pdfmetrics):
+    text = str(text or "").strip()
+    if not text:
+        return [""]
+    words = text.split()
+    lines, current = [], ""
+    for word in words:
+        candidate = word if not current else f"{current} {word}"
+        if pdfmetrics.stringWidth(candidate, font_name, font_size) <= max_width:
+            current = candidate
+        else:
+            if current:
+                lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines or [""]
+
+
+def create_certificate_pdf(row):
+    """Create a one-page A4 Thai medical certificate. ReportLab is imported only here."""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    from reportlab.pdfgen import canvas
+
+    font_name = _reportlab_font_name(pdfmetrics, TTFont)
+    buffer = BytesIO()
+    pdf = canvas.Canvas(buffer, pagesize=A4)
+    page_width, page_height = A4
+
+    left = 32
+    right = page_width - 32
+    y = page_height - 58
+    body_size = 13.40
+    small_size = 11.78
+    leading = 16.17
+    y = page_height - 58 - (2 * leading)
+    def text_line(text, x=left, size=body_size, bold=False, align="left"):
+        nonlocal y
+        pdf.setFont(font_name, size)
+        if align == "center":
+            pdf.drawCentredString(page_width / 2, y, str(text))
+        elif align == "right":
+            pdf.drawRightString(right, y, str(text))
+        else:
+            pdf.drawString(x, y, str(text))
+        y -= leading
+
+    def wrapped(text, x=left, width=None, size=body_size, indent=0, gap=0):
+        nonlocal y
+        width = width or (right - x)
+        pdf.setFont(font_name, size)
+        for line in _wrap_text(text, font_name, size, width - indent, pdfmetrics):
+            pdf.drawString(x + indent, y, line)
+            y -= leading
+        y -= gap
+
+    def divider():
+        nonlocal y
+        y -= 2
+        pdf.line(left, y, right, y)
+        y -= 9
+
+    def mark(value, target):
+        # ใช้ตัวอักษร ASCII แทนสัญลักษณ์ checkbox Unicode
+        # เพราะฟอนต์ THSarabunNew บางรุ่นไม่มี glyph ของ ☑/☐ ทำให้ PDF แสดงช่องว่าง
+        return "[X]" if str(value) == target else "[ ]"
+
+    issue_date = thai_date(get_issue_date(row))
+    name_text = f"{row.get('prefix', '')}{row.get('full_name', '')}"
+    cid_text = citizen_id_display(row.get("citizen_id", ""))
+
+    text_line("ใบรับรองแพทย์", size=19.05, align="center")
+    y += 3
+    text_line("เลขที่ ........................................", align="right", size=small_size)
+    text_line("ส่วนที่ 1  ของผู้ขอรับใบรับรองสุขภาพ", size=15.24)
+    text_line(f"ข้าพเจ้า {name_text}    เลขบัตรประชาชน {cid_text}")
+    wrapped(f"สถานที่อยู่ที่ติดต่อได้ {row.get('address', '')}", gap=0)
+    text_line(f"อีเมล {row.get('email', '')}")
+    text_line("ข้าพเจ้าขอใบรับรองสุขภาพ โดยมีประวัติสุขภาพดังนี้")
+    text_line(f"1. โรคประจำตัว {mark(row.get('chronic'), 'ไม่มี')} ไม่มี  {mark(row.get('chronic'), 'มี')} มี  ระบุ {row.get('chronic_detail', '')}")
+    text_line(f"2. อุบัติเหตุและผ่าตัด {mark(row.get('accident'), 'ไม่มี')} ไม่มี  {mark(row.get('accident'), 'มี')} มี  ระบุ {row.get('accident_detail', '')}")
+    text_line(f"3. เคยรักษาในโรงพยาบาล {mark(row.get('hospital'), 'ไม่มี')} ไม่มี  {mark(row.get('hospital'), 'มี')} มี  ระบุ {row.get('hospital_detail', '')}")
+    text_line(f"4. โรคลมชัก * {mark(row.get('epilepsy'), 'ไม่มี')} ไม่มี  {mark(row.get('epilepsy'), 'มี')} มี  ระบุ {row.get('epilepsy_detail', '')}")
+    text_line(f"5. ประวัติอื่นที่สำคัญ {mark(row.get('other_history'), 'ไม่มี')} ไม่มี  {mark(row.get('other_history'), 'มี')} มี  ระบุ {row.get('other_history_detail', '')}")
+    wrapped(
+        "* ในกรณีโรคลมชัก ให้แนบประวัติการรักษาจากแพทย์ผู้รักษาว่า"
+        "ท่านปลอดจากอาการชักมากกว่า 1 ปี เพื่ออนุญาตให้ขับรถได้",
+        size=10.34,
+    )
+    text_line(f"ลงชื่อ ........................................................ ผู้ขอรับใบรับรองสุขภาพ     วันที่ {issue_date}", align="right", size=small_size)
+
+    y -= leading  # เว้น 1 บรรทัดระหว่างส่วนที่ 1 และเส้นคั่น
+    divider()
+    y -= leading  # เว้นเพิ่มอีก 1 บรรทัดระหว่างเส้นคั่นกับส่วนที่ 2
+    text_line("ส่วนที่ 2  ของแพทย์", size=15.24)
+    text_line(f"สถานที่ตรวจ สถานพยาบาลมหาวิทยาลัยเกษตรศาสตร์ วิทยาเขตกำแพงแสน   วันที่ {issue_date}")
+    text_line(f"ข้าพเจ้า {row.get('doctor_name', '')}   ใบอนุญาตประกอบวิชาชีพเวชกรรมเลขที่ {row.get('doctor_license', '')}")
+    wrapped("สถานพยาบาลมหาวิทยาลัยเกษตรศาสตร์ วิทยาเขตกำแพงแสน เลขที่ 1 หมู่ 6 ตำบลกำแพงแสน อำเภอกำแพงแสน จังหวัดนครปฐม 73140")
+    text_line(f"ได้ตรวจร่างกาย {name_text} เมื่อวันที่ {issue_date}")
+    text_line(
+        f"น้ำหนัก {row.get('weight', '')} กก.  ความสูง {row.get('height', '')} ซม.  "
+        f"ความดันโลหิต {row.get('bp', '')} มม.ปรอท  ชีพจร {row.get('pulse', '')} ครั้ง/นาที"
+    )
+    text_line(
+        f"สุขภาพทั่วไป {mark(row.get('general_status'), 'ปกติ')} ปกติ  "
+        f"{mark(row.get('general_status'), 'ผิดปกติ')} ผิดปกติ ระบุ {row.get('abnormal_detail', '')}"
+    )
+    wrapped(
+        "ขอรับรองว่าบุคคลดังกล่าวไม่เป็นผู้มีร่างกายทุพพลภาพจนไม่สามารถปฏิบัติหน้าที่ได้ "
+        "ไม่ปรากฏอาการของโรคจิตหรือจิตฟั่นเฟือนหรือปัญญาอ่อน ไม่ปรากฏอาการติดยาเสพติดให้โทษ "
+        "หรือโรคพิษสุราเรื้อรัง และไม่ปรากฏอาการของโรคต่อไปนี้",
+        size=small_size,
+    )
+    text_line("1. โรคเรื้อนในระยะติดต่อ หรือระยะที่ปรากฏอาการเป็นที่รังเกียจแก่สังคม", size=small_size)
+    text_line("2. วัณโรคในระยะอันตราย", size=small_size)
+    text_line("3. โรคเท้าช้างในระยะที่ปรากฏอาการเป็นที่รังเกียจแก่สังคม", size=small_size)
+    text_line(f"4. อื่น ๆ ถ้ามี {row.get('other_exam', '')}", size=small_size)
+    wrapped(f"สรุปความคิดเห็นและข้อแนะนำของแพทย์ {row.get('doctor_opinion', '')}", size=body_size)
+
+    y -= 5
+    text_line(
+        f"ลงชื่อ ........................................................ แพทย์ผู้ตรวจ ({row.get('doctor_name', '')})",
+        align="right",
+        size=small_size,
+    )
+    text_line("หมายเหตุ: ประทับตราสถานพยาบาลหลังพิมพ์เอกสาร", size=10.78)
+
+    pdf.showPage()
+    pdf.save()
+    buffer.seek(0)
+    return buffer
+
+
+def dataframe_for_dashboard(source_df):
+    if source_df.empty:
+        return pd.DataFrame()
+
+    output = source_df.copy()
+    output["วันนัดหมาย"] = output["appointment_date"].apply(display_date)
+    output["เวลา"] = output["appointment_time"].astype(str)
+    output["ชื่อ-นามสกุล"] = (
+        output["prefix"].astype(str) + output["full_name"].astype(str)
+    )
+    output["อีเมล"] = output["email"].astype(str)
+    output["สถานะการยืนยัน"] = output["confirmation_status"].replace("", "รอการยืนยัน")
+    output["สถานะงาน"] = output["status"].map(STATUS_LABELS).fillna(output["status"])
+    output["รหัสรายการ"] = output["record_id"].astype(str)
+
+    return output[[
+        "วันนัดหมาย", "เวลา", "ชื่อ-นามสกุล", "อีเมล",
+        "สถานะการยืนยัน", "สถานะงาน", "รหัสรายการ",
+    ]]
+
+
+# =====================================================
+# Global CSS
+# =====================================================
+st.markdown(
+    """
+    <style>
+        .notice-box {
+            border-left: 6px solid #2b6cb0;
+            background: #eef6ff;
+            padding: 12px 16px;
+            border-radius: 6px;
+            margin-bottom: 14px;
+        }
+        .notice-box p { margin: 4px 0; }
+        .dashboard-note {
+            background: #f7fafc;
+            border: 1px solid #cbd5e0;
+            border-radius: 8px;
+            padding: 10px 14px;
+        }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+# =====================================================
+# Load data
+# =====================================================
+try:
+    df, sha = read_csv()
+    df = ensure_columns(df)
+except Exception as error:
+    st.error(f"ไม่สามารถอ่านข้อมูลจาก GitHub ได้: {error}")
+    st.stop()
+
+
+# =====================================================
+# Sidebar menu
+# =====================================================
+st.sidebar.title("เมนู")
+page = st.sidebar.radio(
+    "เลือกหน้า",
+    [
+        "ผู้รับบริการ",
+        "วัดสัญญาณชีพ",
+        "เวชระเบียน",
+        "พยาบาล/แพทย์",
+    ],
+)
+
+
+# =====================================================
+# 1. ผู้รับบริการ
+# =====================================================
+if page == "ผู้รับบริการ":
+    st.title("ระบบนัดหมายขอใบรับรองแพทย์ KU KPS Infirmary")
+
+    st.markdown(
+        """
+        <div class="notice-box">
+            <p><b>คำชี้แจงก่อนนัดหมาย</b></p>
+            <p>• ท่านสามารถแก้ไขวันหรือเวลานัดหมายได้ไม่เกินวันละ 2 ครั้ง</p>
+            <p>• ระบบอนุญาตให้มีนัดหมายได้มากที่สุดสัปดาห์ละ 2 ครั้ง</p>
+            <p>• เวลานัดหมายคือ 08.30–11.00 น. และ 15.00–16.30 น.</p>
+            <p>• ระบบเว้นวันเสาร์–อาทิตย์ วันนักขัตฤกษ์ และวันลาพักผ่อนของแพทย์</p>
+            <p>• หลังบันทึก โปรดเก็บ QR code หรือรหัสรายการไว้ใช้ติดต่อและแก้ไขนัดหมาย</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    booking_tab, edit_tab = st.tabs(["นัดหมายใหม่", "แก้ไขนัดหมาย"])
+
+    current_bkk = now_bkk()
+    today = current_bkk.date()
+    max_day = today + timedelta(days=30)
+    appointment_dates = selectable_appointment_dates(today, max_day, current_bkk)
+
+    with booking_tab:
+        st.subheader("ข้อมูลนัดหมาย")
+        if not appointment_dates:
+            st.error("ไม่พบวันทำการที่เปิดรับนัดหมายภายใน 30 วันข้างหน้า")
+            st.stop()
+
+        appt_date = st.selectbox(
+            "เลือกวันนัดหมาย",
+            appointment_dates,
+            format_func=appointment_date_label,
+            key="booking_appointment_date",
+            help="ระบบไม่แสดงวันเสาร์–อาทิตย์ วันนักขัตฤกษ์ และวันที่แพทย์ลาพักผ่อน",
+        )
+        booking_time_slots = available_time_slots(appt_date, current_bkk)
+        if booking_time_slots:
+            appt_time = st.selectbox(
+                "เลือกเวลา",
+                booking_time_slots,
+                key="booking_appointment_time",
+            )
+        else:
+            appt_time = None
+            st.warning("วันนี้ไม่มีเวลานัดหมายที่ยังไม่ผ่าน กรุณาเลือกวันทำการถัดไป")
+
+        with st.form("patient_booking_form"):
+            st.subheader("ส่วนที่ 1 ของผู้ขอรับใบรับรองสุขภาพ")
+
+            citizen_id = st.text_input("เลขบัตรประชาชน 13 หลัก")
+            email = st.text_input("อีเมลสำหรับรับการยืนยันนัดหมาย")
+            prefix = st.selectbox("คำนำหน้า", ["นาย", "นาง", "นางสาว", "อื่น ๆ"])
+            other_prefix = st.text_input("ระบุคำนำหน้า") if prefix == "อื่น ๆ" else ""
+            full_name = st.text_input("ชื่อ-นามสกุล")
+            sex = st.selectbox("เพศ", ["ชาย", "หญิง", "อื่น ๆ"])
+            address = st.text_area("ที่อยู่ที่ติดต่อได้")
+
+            purpose = st.selectbox(
+                "วัตถุประสงค์",
+                ["ใบอนุญาตขับรถ", "สมัครงาน", "สมัครเรียน", "อื่น ๆ"],
+            )
+            purpose_other = (
+                st.text_input("ระบุวัตถุประสงค์อื่น") if purpose == "อื่น ๆ" else ""
+            )
+
+            st.info(
+                "ประวัติสุขภาพส่วนที่ 1 จะกรอกในวันนัดหมายที่หน้า “วัดสัญญาณชีพ”"
+            )
+
+            consent = st.checkbox(
+                "ข้าพเจ้ารับรองว่าข้อมูลการนัดหมายเป็นความจริง"
+            )
+
+            booking_submitted = st.form_submit_button(
+                "บันทึกนัดหมายและสร้าง QR",
+                type="primary",
+            )
+
+        if booking_submitted:
+            cid = clean_id(citizen_id)
+            normalized_email = normalize_email(email)
+
+            if len(cid) != 13:
+                st.error("กรุณากรอกเลขบัตรประชาชน 13 หลัก")
+                st.stop()
+
+            if not valid_email(normalized_email):
+                st.error("กรุณากรอกอีเมลให้ถูกต้อง")
+                st.stop()
+
+            if not is_workday(appt_date):
+                reason = holiday_name(appt_date)
+                message = f"วันที่เลือกเป็นวันหยุด: {reason}" if reason else "วันที่เลือกเป็นวันเสาร์หรือวันอาทิตย์"
+                st.error(message)
+                st.stop()
+
+            if not appt_time or not appointment_is_in_future(appt_date, appt_time):
+                st.error("เวลานัดหมายนี้ผ่านไปแล้วตามเวลา Bangkok กรุณาเลือกเวลาใหม่")
+                st.stop()
+
+            if not full_name.strip():
+                st.error("กรุณากรอกชื่อ-นามสกุล")
+                st.stop()
+
+            if prefix == "อื่น ๆ" and not other_prefix.strip():
+                st.error("กรุณาระบุคำนำหน้า")
+                st.stop()
+
+            if purpose == "อื่น ๆ" and not purpose_other.strip():
+                st.error("กรุณาระบุวัตถุประสงค์")
+                st.stop()
+
+            if not consent:
+                st.error("กรุณายืนยันว่าข้อมูลเป็นความจริง")
+                st.stop()
+
+            used_in_week = weekly_booking_count(df, cid, appt_date)
+            if used_in_week >= 2:
+                st.error("สัปดาห์นี้ท่านมีนัดหมายครบ 2 ครั้งแล้ว")
+                st.stop()
+
+            record_id = str(uuid.uuid4())[:8].upper()
+            real_prefix = other_prefix.strip() if prefix == "อื่น ๆ" else prefix
+            real_purpose = purpose_other.strip() if purpose == "อื่น ๆ" else purpose
+            timestamp = now_bkk().isoformat()
+
+            record = {
+                "record_id": record_id,
+                "created_at_bkk": timestamp,
+                "last_modified_at_bkk": timestamp,
+                "status": "booked",
+                "appointment_date": appt_date.strftime("%Y-%m-%d"),
+                "appointment_time": appt_time,
+                "email": normalized_email,
+                "confirmation_status": "รอการยืนยัน",
+                "confirmation_note": "",
+                "confirmation_at_bkk": "",
+                "edit_count_date": "",
+                "edit_count_today": "0",
+                "last_appointment_edit_at_bkk": "",
+                "citizen_id": cid,
+                "prefix": real_prefix,
+                "full_name": full_name.strip(),
+                "sex": sex,
+                "address": address.strip(),
+                "purpose": real_purpose,
+                "chronic": "ไม่มี",
+                "chronic_detail": "",
+                "accident": "ไม่มี",
+                "accident_detail": "",
+                "hospital": "ไม่มี",
+                "hospital_detail": "",
+                "epilepsy": "ไม่มี",
+                "epilepsy_detail": "",
+                "other_history": "ไม่มี",
+                "other_history_detail": "",
+                "urine_meth_result": "Negative",
+            }
+
+            try:
+                new_df = pd.concat([df, pd.DataFrame([record])], ignore_index=True)
+                new_df = ensure_columns(new_df)
+                save_csv(new_df, sha)
+            except Exception as error:
+                st.error(f"บันทึกข้อมูลไม่สำเร็จ: {error}")
+                st.stop()
+
+            st.success("บันทึกนัดหมายเรียบร้อยแล้ว")
+            st.subheader("QR code สำหรับนำมาติดต่อหน้างาน")
+            st.image(make_qr(record_id), width=260)
+            st.code(record_id)
+            st.info("โปรดบันทึกภาพ QR code พร้อมรหัส เพื่อแสดงตนต่อสถานพยาบาล")
+            st.write(
+                f"วันนัดหมาย: {appt_date.strftime('%d/%m/%Y')} เวลา {appt_time} น."
+            )
+            st.write(f"อีเมลยืนยัน: {normalized_email}")
+
+    with edit_tab:
+        st.subheader("แก้ไขวันหรือเวลานัดหมาย")
+        st.caption("ใช้รหัสรายการจากใต้ QR code พร้อมเลขบัตรประชาชนและอีเมลเดิม")
+
+        edit_record_id = enter_record_id(
+            "edit",
+            "รหัสรายการ",
+        )
+
+        if not appointment_dates:
+            st.error("ไม่พบวันทำการที่เปิดรับนัดหมายภายใน 30 วันข้างหน้า")
+            st.stop()
+
+        new_appt_date = st.selectbox(
+            "วันนัดหมายใหม่",
+            appointment_dates,
+            format_func=appointment_date_label,
+            key="edit_appointment_date",
+            help="ระบบไม่แสดงวันเสาร์–อาทิตย์ วันนักขัตฤกษ์ และวันที่แพทย์ลาพักผ่อน",
+        )
+        edit_time_slots = available_time_slots(new_appt_date, current_bkk)
+        if edit_time_slots:
+            new_appt_time = st.selectbox(
+                "เวลานัดหมายใหม่",
+                edit_time_slots,
+                key="new_appointment_time",
+            )
+        else:
+            new_appt_time = None
+            st.warning("วันนี้ไม่มีเวลานัดหมายที่ยังไม่ผ่าน กรุณาเลือกวันทำการถัดไป")
+
+        with st.form("edit_appointment_form"):
+            edit_citizen_id = st.text_input("เลขบัตรประชาชน 13 หลัก")
+            edit_email = st.text_input("อีเมลที่ใช้จอง")
+            edit_submitted = st.form_submit_button(
+                "ยืนยันการแก้ไขนัดหมาย",
+                type="primary",
+            )
+
+        if edit_submitted:
+            cid = clean_id(edit_citizen_id)
+            normalized_email = normalize_email(edit_email)
+            idx = find_by_record(df, edit_record_id)
+
+            if idx is None:
+                st.error("ไม่พบรหัสรายการ")
+                st.stop()
+
+            row = df.loc[idx]
+
+            if clean_id(row.get("citizen_id", "")) != cid:
+                st.error("เลขบัตรประชาชนไม่ตรงกับข้อมูลนัดหมาย")
+                st.stop()
+
+            if normalize_email(row.get("email", "")) != normalized_email:
+                st.error("อีเมลไม่ตรงกับข้อมูลนัดหมาย")
+                st.stop()
+
+            if row.get("status", "") not in ACTIVE_STATUSES:
+                st.error("รายการนี้ไม่อยู่ในสถานะที่แก้ไขนัดหมายได้")
+                st.stop()
+
+            if row.get("status", "") in {"doctor_approved", "printed"}:
+                st.error("รายการนี้ผ่านการตรวจแพทย์แล้ว ไม่สามารถแก้ไขนัดหมายได้")
+                st.stop()
+
+            if not is_workday(new_appt_date):
+                reason = holiday_name(new_appt_date)
+                message = f"วันที่เลือกเป็นวันหยุด: {reason}" if reason else "วันที่เลือกเป็นวันเสาร์หรือวันอาทิตย์"
+                st.error(message)
+                st.stop()
+
+            if not new_appt_time or not appointment_is_in_future(
+                new_appt_date, new_appt_time
+            ):
+                st.error("เวลานัดหมายนี้ผ่านไปแล้วตามเวลา Bangkok กรุณาเลือกเวลาใหม่")
+                st.stop()
+
+            if edits_used_today(df, cid) >= 2:
+                st.error("วันนี้ท่านแก้ไขนัดหมายครบ 2 ครั้งแล้ว")
+                st.stop()
+
+            other_bookings = weekly_booking_count(
+                df,
+                cid,
+                new_appt_date,
+                exclude_record_id=row.get("record_id", ""),
+            )
+            if other_bookings >= 2:
+                st.error("สัปดาห์ที่เลือกมีนัดหมายอื่นครบ 2 ครั้งแล้ว")
+                st.stop()
+
+            old_date = row.get("appointment_date", "")
+            old_time = row.get("appointment_time", "")
+            new_date_text = new_appt_date.strftime("%Y-%m-%d")
+
+            if old_date == new_date_text and old_time == new_appt_time:
+                st.info("วันและเวลานัดหมายยังเหมือนเดิม จึงไม่มีการแก้ไขข้อมูล")
+                st.stop()
+
+            today_text = now_bkk().date().isoformat()
+            current_record_count = (
+                safe_int(row.get("edit_count_today", ""), 0)
+                if row.get("edit_count_date", "") == today_text
+                else 0
+            )
+            timestamp = now_bkk().isoformat()
+
+            df.loc[idx, "appointment_date"] = new_date_text
+            df.loc[idx, "appointment_time"] = new_appt_time
+            df.loc[idx, "edit_count_date"] = today_text
+            df.loc[idx, "edit_count_today"] = str(current_record_count + 1)
+            df.loc[idx, "last_appointment_edit_at_bkk"] = timestamp
+            df.loc[idx, "last_modified_at_bkk"] = timestamp
+            df.loc[idx, "confirmation_status"] = "รอการยืนยัน"
+            df.loc[idx, "confirmation_note"] = "แก้ไขนัดหมายโดยผู้รับบริการ"
+            df.loc[idx, "confirmation_at_bkk"] = ""
+
+            try:
+                save_csv(df, sha)
+            except Exception as error:
+                st.error(f"แก้ไขข้อมูลไม่สำเร็จ: {error}")
+                st.stop()
+
+            used_after = edits_used_today(df, cid)
+            st.success("แก้ไขนัดหมายเรียบร้อยแล้ว")
+            st.write(
+                f"วันนัดหมายใหม่: {new_appt_date.strftime('%d/%m/%Y')} "
+                f"เวลา {new_appt_time} น."
+            )
+            st.write(f"วันนี้ใช้สิทธิ์แก้ไขแล้ว {used_after}/2 ครั้ง")
+
+
+# =====================================================
+# 2. วัดสัญญาณชีพ
+# =====================================================
+elif page == "วัดสัญญาณชีพ":
+    st.title("วัดสัญญาณชีพ")
+    st.caption("กรอกรหัสรายการจากใต้ QR code แล้วบันทึกค่าที่วัดได้ด้วยตนเอง")
+
+    record_id = enter_record_id(
+        "vital",
+        "กรอกรหัสรายการจากใต้ QR code",
+    )
+
+    if not record_id:
+        st.info("กรุณากรอกรหัสรายการจากใต้ QR code")
+        st.stop()
+
+    idx = find_by_record(df, record_id)
+    if idx is None:
+        st.error("ไม่พบข้อมูลนัดหมาย กรุณาตรวจสอบรหัสรายการ")
+        st.stop()
+
+    row = df.loc[idx]
+    if row.get("status", "") == "cancelled":
+        st.error("รายการนัดหมายนี้ถูกยกเลิกแล้ว")
+        st.stop()
+
+    today_bkk = now_bkk().date().isoformat()
+    if str(row.get("appointment_date", "")) != today_bkk:
+        st.info("รอวัดสัญญาณชีพที่สถานพยาบาลในวันนัดหมาย")
+        st.write(
+            f"วันนัดหมาย: {display_date(row.get('appointment_date', ''))} "
+            f"เวลา {row.get('appointment_time', '')} น."
+        )
+        st.stop()
+
+    st.success(
+        f"{row.get('prefix', '')}{row.get('full_name', '')} "
+        f"— นัดเวลา {row.get('appointment_time', '')} น."
+    )
+
+    with st.form("vital_manual_form"):
+        st.subheader("กรอกค่าที่วัดได้")
+        existing_sbp, existing_dbp = split_bp(row.get("vital_bp", ""))
+
+        st.markdown("**BP (mmHg)**")
+        bp_col1, bp_slash_col, bp_col2 = st.columns([1, 0.12, 1])
+        with bp_col1:
+            vital_sbp = st.text_input(
+                "ค่าบน",
+                value=existing_sbp,
+                placeholder="120",
+                max_chars=3,
+                label_visibility="collapsed",
+            )
+        with bp_slash_col:
+            st.markdown(
+                "<div style='text-align:center;font-size:2rem;padding-top:0.15rem;'>/</div>",
+                unsafe_allow_html=True,
+            )
+        with bp_col2:
+            vital_dbp = st.text_input(
+                "ค่าล่าง",
+                value=existing_dbp,
+                placeholder="80",
+                max_chars=3,
+                label_visibility="collapsed",
+            )
+
+        vital_bp = f"{vital_sbp.strip()}/{vital_dbp.strip()}"
+
+        c1, c2 = st.columns(2)
+        with c1:
+            vital_weight = st.text_input(
+                "BW (kg)",
+                value=row.get("vital_weight", ""),
+            )
+            vital_height = st.text_input(
+                "Ht (cm)",
+                value=row.get("vital_height", ""),
+            )
+        with c2:
+            vital_pulse = st.text_input(
+                "P (ครั้ง/นาที)",
+                value=row.get("vital_pulse", ""),
+            )
+
+        st.divider()
+        st.subheader("ส่วนที่ 1 ของผู้ขอรับใบรับรองสุขภาพ")
+        st.caption("กรุณาเลือก “ไม่มี” หรือ “มี” และระบุรายละเอียดเมื่อเลือก “มี”")
+
+        chronic = st.radio(
+            "1. โรคประจำตัว",
+            ["ไม่มี", "มี"],
+            index=1 if row.get("chronic", "") == "มี" else 0,
+            horizontal=True,
+            key="vital_chronic",
+        )
+        chronic_detail = st.text_input(
+            "ระบุโรคประจำตัว",
+            value=row.get("chronic_detail", ""),
+            disabled=chronic != "มี",
+        )
+
+        accident = st.radio(
+            "2. อุบัติเหตุและผ่าตัด",
+            ["ไม่มี", "มี"],
+            index=1 if row.get("accident", "") == "มี" else 0,
+            horizontal=True,
+            key="vital_accident",
+        )
+        accident_detail = st.text_input(
+            "ระบุอุบัติเหตุและ/หรือการผ่าตัด",
+            value=row.get("accident_detail", ""),
+            disabled=accident != "มี",
+        )
+
+        hospital = st.radio(
+            "3. เคยเข้ารับการรักษาในโรงพยาบาล",
+            ["ไม่มี", "มี"],
+            index=1 if row.get("hospital", "") == "มี" else 0,
+            horizontal=True,
+            key="vital_hospital",
+        )
+        hospital_detail = st.text_input(
+            "ระบุรายละเอียดการรักษาในโรงพยาบาล",
+            value=row.get("hospital_detail", ""),
+            disabled=hospital != "มี",
+        )
+
+        epilepsy = st.radio(
+            "4. โรคลมชัก*",
+            ["ไม่มี", "มี"],
+            index=1 if row.get("epilepsy", "") == "มี" else 0,
+            horizontal=True,
+            key="vital_epilepsy",
+        )
+        epilepsy_detail = st.text_input(
+            "ระบุรายละเอียดโรคลมชัก",
+            value=row.get("epilepsy_detail", ""),
+            disabled=epilepsy != "มี",
+        )
+
+        other_history = st.radio(
+            "5. ประวัติอื่นที่สำคัญ",
+            ["ไม่มี", "มี"],
+            index=1 if row.get("other_history", "") == "มี" else 0,
+            horizontal=True,
+            key="vital_other_history",
+        )
+        other_history_detail = st.text_input(
+            "ระบุประวัติอื่นที่สำคัญ",
+            value=row.get("other_history_detail", ""),
+            disabled=other_history != "มี",
+        )
+
+        st.info(
+            "* ในกรณีโรคลมชัก ให้แนบประวัติการรักษาจากแพทย์ผู้รักษาว่า"
+            "ท่านปลอดจากอาการชักมากกว่า 1 ปี เพื่ออนุญาตให้ขับรถได้"
+        )
+        st.write("ลงชื่อ ........................................................ ผู้ขอรับใบรับรองสุขภาพ")
+        st.caption("เว้นว่างไว้เพื่อลงนามบนเอกสารฉบับพิมพ์")
+
+        confirmed = st.checkbox(
+            "ข้าพเจ้าตรวจสอบสัญญาณชีพและรับรองว่าประวัติสุขภาพข้างต้นเป็นความจริง"
+        )
+        save_vitals = st.form_submit_button(
+            "บันทึกสัญญาณชีพและประวัติสุขภาพ",
+            type="primary",
+        )
+
+    if save_vitals:
+        if not confirmed:
+            st.error("กรุณายืนยันว่าได้ตรวจสอบค่าที่กรอกแล้ว")
+            st.stop()
+        if not valid_bp(vital_bp):
+            st.error("กรุณากรอก BP ในรูป systolic/diastolic เช่น 120/80")
+            st.stop()
+        if not valid_positive_number(vital_pulse, 20, 250):
+            st.error("กรุณาตรวจสอบค่า P")
+            st.stop()
+        if not valid_positive_number(vital_weight, 10, 400):
+            st.error("กรุณาตรวจสอบค่า BW")
+            st.stop()
+        if not valid_positive_number(vital_height, 50, 250):
+            st.error("กรุณาตรวจสอบค่า Ht")
+            st.stop()
+
+        required_details = [
+            (chronic, chronic_detail, "กรุณาระบุโรคประจำตัว"),
+            (accident, accident_detail, "กรุณาระบุอุบัติเหตุหรือการผ่าตัด"),
+            (hospital, hospital_detail, "กรุณาระบุรายละเอียดการรักษาในโรงพยาบาล"),
+            (epilepsy, epilepsy_detail, "กรุณาระบุรายละเอียดโรคลมชัก"),
+            (other_history, other_history_detail, "กรุณาระบุประวัติอื่นที่สำคัญ"),
+        ]
+        for answer, detail, message in required_details:
+            if answer == "มี" and not detail.strip():
+                st.error(message)
+                st.stop()
+
+        timestamp = now_bkk().isoformat()
+        df.loc[idx, "vital_bp"] = vital_bp.strip()
+        df.loc[idx, "vital_pulse"] = vital_pulse.strip()
+        df.loc[idx, "vital_weight"] = vital_weight.strip()
+        df.loc[idx, "vital_height"] = vital_height.strip()
+        df.loc[idx, "vital_ai_raw"] = ""
+        df.loc[idx, "chronic"] = chronic
+        df.loc[idx, "chronic_detail"] = chronic_detail.strip() if chronic == "มี" else ""
+        df.loc[idx, "accident"] = accident
+        df.loc[idx, "accident_detail"] = accident_detail.strip() if accident == "มี" else ""
+        df.loc[idx, "hospital"] = hospital
+        df.loc[idx, "hospital_detail"] = hospital_detail.strip() if hospital == "มี" else ""
+        df.loc[idx, "epilepsy"] = epilepsy
+        df.loc[idx, "epilepsy_detail"] = epilepsy_detail.strip() if epilepsy == "มี" else ""
+        df.loc[idx, "other_history"] = other_history
+        df.loc[idx, "other_history_detail"] = (
+            other_history_detail.strip() if other_history == "มี" else ""
+        )
+        df.loc[idx, "vital_checked_at_bkk"] = timestamp
+        df.loc[idx, "last_modified_at_bkk"] = timestamp
+
+        try:
+            save_csv(df, sha)
+            st.success("บันทึกสัญญาณชีพเรียบร้อยแล้ว")
+            st.write({
+                "BP": vital_bp,
+                "P": vital_pulse,
+                "BW": vital_weight,
+                "Ht": vital_height,
+            })
+        except Exception as error:
+            st.error(f"บันทึกข้อมูลไม่สำเร็จ: {error}")
+
+
+# =====================================================
+# 3. เวชระเบียน
+# =====================================================
+elif page == "เวชระเบียน":
+    password_gate(PASS_REG, "password_registry")
+    st.title("เวชระเบียนและการยืนยันนัดหมาย")
+
+    selected_date = st.date_input(
+        "แสดงรายชื่อวันที่",
+        value=now_bkk().date(),
+        format="DD/MM/YYYY",
+    )
+
+    selected_date_text = selected_date.strftime("%Y-%m-%d")
+    appointments = df[
+        df["appointment_date"].astype(str).eq(selected_date_text)
+        & ~df["status"].astype(str).eq("cancelled")
+    ].copy()
+
+    if not appointments.empty:
+        appointments = appointments.sort_values(
+            ["appointment_time", "full_name"],
+            kind="stable",
+        )
+        st.dataframe(
+            dataframe_for_dashboard(appointments),
+            width="stretch",
+            hide_index=True,
+        )
+    else:
+        st.info("ไม่พบรายชื่อนัดหมายในวันที่เลือก")
+
+    st.markdown(
+        """
+        <div class="dashboard-note">
+            เลือกรายชื่อจากรายการด้านล่าง หรือกรอกรหัสรายการจากใต้ QR code
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    record_options = appointments["record_id"].astype(str).tolist()
+    record_label_map = {
+        str(row["record_id"]): (
+            f"{row['appointment_time']} | {row['prefix']}{row['full_name']} | "
+            f"{row['email']} | {row['confirmation_status']}"
+        )
+        for _, row in appointments.iterrows()
+    }
+
+    selected_record_id = ""
+    if record_options:
+        selected_record_id = st.selectbox(
+            "เลือกรายการนัดหมาย",
+            options=[""] + record_options,
+            format_func=lambda value: "-- เลือกรายการ --" if value == "" else record_label_map[value],
+        )
+
+    manual_record_id = enter_record_id(
+        "registry",
+        "กรอกรหัสรายการจากใต้ QR code",
+    )
+    if manual_record_id:
+        selected_record_id = manual_record_id
+
+    if selected_record_id:
+        idx = find_by_record(df, selected_record_id)
+        if idx is None:
+            st.error("ไม่พบข้อมูล")
+            st.stop()
+
+        row = df.loc[idx]
+        st.success("พบข้อมูลผู้รับบริการ")
+
+        detail_col1, detail_col2 = st.columns(2)
+        with detail_col1:
+            st.write(f"**ชื่อ:** {row.get('prefix', '')}{row.get('full_name', '')}")
+            st.write(f"**วันนัด:** {display_date(row.get('appointment_date', ''))}")
+            st.write(f"**เวลา:** {row.get('appointment_time', '')} น.")
+            st.write(f"**เลขบัตรประชาชน:** {citizen_id_display(row.get('citizen_id', ''))}")
+        with detail_col2:
+            email_value = row.get("email", "")
+            st.write(f"**อีเมล:** {email_value}")
+            st.write(f"**วัตถุประสงค์:** {row.get('purpose', '')}")
+            st.write(
+                f"**สถานะงาน:** {STATUS_LABELS.get(row.get('status', ''), row.get('status', ''))}"
+            )
+            st.write(
+                f"**สถานะการยืนยัน:** {row.get('confirmation_status', '') or 'รอการยืนยัน'}"
+            )
+
+        if email_value:
+            subject = quote("ยืนยันนัดหมายขอใบรับรองแพทย์")
+            body = quote(
+                f"เรียน คุณ{row.get('full_name', '')}\n\n"
+                f"ขอยืนยันนัดหมายวันที่ {display_date(row.get('appointment_date', ''))} "
+                f"เวลา {row.get('appointment_time', '')} น.\n"
+                "สถานพยาบาลมหาวิทยาลัยเกษตรศาสตร์ วิทยาเขตกำแพงแสน\n\n"
+                f"รหัสรายการ: {row.get('record_id', '')}"
+            )
+            st.markdown(
+                f"[เปิดอีเมลเพื่อส่งข้อความยืนยัน](mailto:{email_value}?subject={subject}&body={body})"
+            )
+
+        with st.form("registry_confirmation_form"):
+            hn = st.text_input("เลขเวชระเบียน / HN", value=row.get("hn", ""))
+            registration_note = st.text_area(
+                "หมายเหตุเวชระเบียน",
+                value=row.get("registration_note", ""),
+            )
+
+            current_confirmation = row.get("confirmation_status", "") or "รอการยืนยัน"
+            confirmation_index = (
+                CONFIRMATION_OPTIONS.index(current_confirmation)
+                if current_confirmation in CONFIRMATION_OPTIONS else 0
+            )
+            confirmation_status = st.selectbox(
+                "สถานะการยืนยันกลับ",
+                CONFIRMATION_OPTIONS,
+                index=confirmation_index,
+            )
+            confirmation_note = st.text_area(
+                "หมายเหตุการยืนยัน",
+                value=row.get("confirmation_note", ""),
+            )
+
+            save_registry = st.form_submit_button(
+                "บันทึกเวชระเบียนและสถานะการยืนยัน",
+                type="primary",
+            )
+
+        if save_registry:
+            timestamp = now_bkk().isoformat()
+            df.loc[idx, "hn"] = hn.strip()
+            df.loc[idx, "registration_note"] = registration_note.strip()
+            df.loc[idx, "registered_at_bkk"] = timestamp
+            df.loc[idx, "confirmation_status"] = confirmation_status
+            df.loc[idx, "confirmation_note"] = confirmation_note.strip()
+            df.loc[idx, "confirmation_at_bkk"] = timestamp
+            df.loc[idx, "last_modified_at_bkk"] = timestamp
+
+            if confirmation_status == "ยกเลิกนัด":
+                df.loc[idx, "status"] = "cancelled"
+            elif row.get("status", "") == "booked":
+                df.loc[idx, "status"] = "registered"
+
+            try:
+                save_csv(df, sha)
+                st.success("บันทึกเวชระเบียนและสถานะการยืนยันแล้ว")
+            except Exception as error:
+                st.error(f"บันทึกข้อมูลไม่สำเร็จ: {error}")
+
+
+# =====================================================
+# 4. พยาบาล/แพทย์
+# =====================================================
+elif page == "พยาบาล/แพทย์":
+    password_gate(PASS_DOC, "password_doctor")
+    st.title("แพทย์ตรวจและอนุมัติ")
+
+    record_id = enter_record_id("doctor", "กรอกรหัสรายการจากใต้ QR code")
+    if not record_id:
+        st.stop()
+
+    idx = find_by_record(df, record_id)
+    if idx is None:
+        st.error("ไม่พบข้อมูล")
+        st.stop()
+
+    row = df.loc[idx]
+    st.write(
+        {
+            "ชื่อ": f"{row.get('prefix', '')}{row.get('full_name', '')}",
+            "เลขบัตรประชาชน": citizen_id_display(row.get("citizen_id", "")),
+            "วัตถุประสงค์": row.get("purpose", ""),
+            "ผล Methamphetamine": row.get("urine_meth_result", "") or "Negative",
+        }
+    )
+
+    st.subheader("ส่วนที่ 1 ของผู้ขอรับใบรับรองสุขภาพ")
+    st.write({
+        "1. โรคประจำตัว": (
+            "ไม่มี" if row.get("chronic", "") != "มี"
+            else f"มี — {row.get('chronic_detail', '')}"
+        ),
+        "2. อุบัติเหตุและผ่าตัด": (
+            "ไม่มี" if row.get("accident", "") != "มี"
+            else f"มี — {row.get('accident_detail', '')}"
+        ),
+        "3. เคยเข้ารับการรักษาในโรงพยาบาล": (
+            "ไม่มี" if row.get("hospital", "") != "มี"
+            else f"มี — {row.get('hospital_detail', '')}"
+        ),
+        "4. โรคลมชัก": (
+            "ไม่มี" if row.get("epilepsy", "") != "มี"
+            else f"มี — {row.get('epilepsy_detail', '')}"
+        ),
+        "5. ประวัติอื่นที่สำคัญ": (
+            "ไม่มี" if row.get("other_history", "") != "มี"
+            else f"มี — {row.get('other_history_detail', '')}"
+        ),
+    })
+    if row.get("epilepsy", "") == "มี":
+        st.warning(
+            "กรณีโรคลมชัก: กรุณาตรวจเอกสารจากแพทย์ผู้รักษาว่า"
+            "ปลอดจากอาการชักมากกว่า 1 ปี ก่อนอนุญาตให้ขับรถ"
+        )
+
+    if row.get("vital_checked_at_bkk", ""):
+        st.subheader("ข้อมูลจากสถานีวัดสัญญาณชีพ")
+        st.write({
+            "BP": row.get("vital_bp", ""),
+            "P": row.get("vital_pulse", ""),
+            "BW": row.get("vital_weight", ""),
+            "Ht": row.get("vital_height", ""),
+            "บันทึกเวลา": row.get("vital_checked_at_bkk", ""),
+        })
+        st.caption("แพทย์/พยาบาลกรุณาตรวจสอบ และแก้ไขในช่องด้านล่างได้")
+    else:
+        st.warning("ยังไม่มีข้อมูลจากสถานีวัดสัญญาณชีพ")
+
+    doctor_names = list(DOCTORS.keys())
+    current_doctor = row.get("doctor_name", "")
+    doctor_index = doctor_names.index(current_doctor) if current_doctor in doctor_names else 0
+    doctor_name = st.selectbox("แพทย์ผู้ตรวจ", doctor_names, index=doctor_index)
+    license_no = DOCTORS[doctor_name]
+    st.write(f"เลขที่ใบอนุญาต: {license_no}")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        weight = st.text_input(
+            "น้ำหนัก กก.",
+            value=row.get("weight", "") or row.get("vital_weight", ""),
+        )
+    with col2:
+        height = st.text_input(
+            "ส่วนสูง ซม.",
+            value=row.get("height", "") or row.get("vital_height", ""),
+        )
+
+    existing_doctor_sbp, existing_doctor_dbp = split_bp(
+        row.get("bp", "") or row.get("vital_bp", "")
+    )
+    st.markdown("**ความดันโลหิต (mmHg)**")
+    doctor_bp_col1, doctor_bp_slash_col, doctor_bp_col2 = st.columns([1, 0.12, 1])
+    with doctor_bp_col1:
+        doctor_sbp = st.text_input(
+            "ค่าบน",
+            value=existing_doctor_sbp,
+            placeholder="120",
+            max_chars=3,
+            key="doctor_sbp",
+            label_visibility="collapsed",
+        )
+    with doctor_bp_slash_col:
+        st.markdown(
+            "<div style='text-align:center;font-size:2rem;padding-top:0.15rem;'>/</div>",
+            unsafe_allow_html=True,
+        )
+    with doctor_bp_col2:
+        doctor_dbp = st.text_input(
+            "ค่าล่าง",
+            value=existing_doctor_dbp,
+            placeholder="80",
+            max_chars=3,
+            key="doctor_dbp",
+            label_visibility="collapsed",
+        )
+
+    bp = f"{doctor_sbp.strip()}/{doctor_dbp.strip()}"
+    pulse = st.text_input(
+        "ชีพจร ครั้ง/นาที",
+        value=row.get("pulse", "") or row.get("vital_pulse", ""),
+    )
+
+    status_options = ["ปกติ", "ผิดปกติ"]
+    current_general = row.get("general_status", "")
+    status_index = status_options.index(current_general) if current_general in status_options else 0
+    general_status = st.radio(
+        "สุขภาพทั่วไป",
+        status_options,
+        index=status_index,
+        horizontal=True,
+    )
+
+    abnormal_detail = st.text_input(
+        "ระบุความผิดปกติ",
+        value=row.get("abnormal_detail", ""),
+        disabled=general_status != "ผิดปกติ",
+    )
+    other_exam = st.text_input("อื่น ๆ ถ้ามี", value=row.get("other_exam", ""))
+
+    default_opinion = (
+        row.get("doctor_opinion", "")
+        or f"คุณ{row.get('full_name', '')} มีสุขภาพแข็งแรงดี"
+    )
+    opinion = st.text_area("สรุปความคิดเห็นแพทย์", value=default_opinion)
+
+    approve = st.checkbox("แพทย์ตรวจแล้วและอนุมัติให้ออกใบรับรองแพทย์")
+
+    if st.button("Approve", type="primary"):
+        if not approve:
+            st.error("กรุณาติ๊กยืนยันการอนุมัติ")
+            st.stop()
+        if not valid_bp(bp):
+            st.error("กรุณากรอก BP ค่าบนและค่าล่างให้ถูกต้อง")
+            st.stop()
+
+        timestamp = now_bkk().isoformat()
+        df.loc[idx, "doctor_name"] = doctor_name
+        df.loc[idx, "doctor_license"] = license_no
+        df.loc[idx, "weight"] = weight.strip()
+        df.loc[idx, "height"] = height.strip()
+        df.loc[idx, "bp"] = bp.strip()
+        df.loc[idx, "pulse"] = pulse.strip()
+        df.loc[idx, "general_status"] = general_status
+        df.loc[idx, "abnormal_detail"] = (
+            abnormal_detail.strip() if general_status == "ผิดปกติ" else ""
+        )
+        df.loc[idx, "other_exam"] = other_exam.strip()
+        df.loc[idx, "doctor_opinion"] = opinion.strip()
+        df.loc[idx, "doctor_approved_at_bkk"] = timestamp
+        df.loc[idx, "last_modified_at_bkk"] = timestamp
+        df.loc[idx, "status"] = "doctor_approved"
+
+        try:
+            save_csv(df, sha)
+            st.success("แพทย์อนุมัติเรียบร้อยแล้ว")
+            st.rerun()
+        except Exception as error:
+            st.error(f"บันทึกข้อมูลไม่สำเร็จ: {error}")
+
+    # Preview และสั่งพิมพ์อยู่ในหน้าแพทย์เดียวกัน
+    current_row = df.loc[idx].to_dict()
+    if current_row.get("status") in {"doctor_approved", "printed"}:
+        st.divider()
+        st.subheader("Preview ใบรับรองแพทย์")
+        st.caption(
+            "ตรวจสอบข้อมูลก่อนพิมพ์ จากนั้นดาวน์โหลด PDF และสั่งพิมพ์จากโทรศัพท์ของแพทย์ได้ทันที"
+        )
+
+        certificate_html = build_certificate_html(current_row)
+        st.markdown(certificate_html, unsafe_allow_html=True)
+
+        try:
+            pdf_buffer = create_certificate_pdf(current_row)
+            st.download_button(
+                label="ดาวน์โหลด PDF เพื่อพิมพ์",
+                data=pdf_buffer.getvalue(),
+                file_name=f"medical_certificate_{current_row.get('record_id', '')}.pdf",
+                mime="application/pdf",
+                type="primary",
+                key=f"doctor_download_{current_row.get('record_id', '')}",
+            )
+        except Exception as error:
+            st.error(f"สร้าง PDF ไม่สำเร็จ: {error}")
+            st.info("กรุณาตรวจสอบว่ามีไฟล์ THSarabunNew.ttf อยู่ใน repository เดียวกับ MedCert.py")
+
+        if current_row.get("status") == "printed":
+            printed_time = parse_iso_datetime(current_row.get("printed_at_bkk", ""))
+            if printed_time:
+                st.success(
+                    "บันทึกว่าพิมพ์แล้วเมื่อ "
+                    f"{printed_time.strftime('%d/%m/%Y %H:%M')} น."
+                )
+            else:
+                st.success("บันทึกสถานะพิมพ์แล้ว")
+        elif st.button(
+            "บันทึกว่าพิมพ์แล้ว",
+            key=f"doctor_mark_printed_{current_row.get('record_id', '')}",
+        ):
+            timestamp = now_bkk().isoformat()
+            df.loc[idx, "printed_at_bkk"] = timestamp
+            df.loc[idx, "last_modified_at_bkk"] = timestamp
+            df.loc[idx, "status"] = "printed"
+
+            try:
+                save_csv(df, sha)
+                st.success("บันทึกสถานะพิมพ์แล้ว")
+                st.rerun()
+            except Exception as error:
+                st.error(f"บันทึกข้อมูลไม่สำเร็จ: {error}")
+
+
+
+
+
+
+
+
+
+
